@@ -1,8 +1,4 @@
-import { eventSource, event_types } from '../../../../../../public/scripts/extensions.js';
-
-// The actual imports will be provided by SillyTavern at runtime
-// We'll use getContext() to access ST internals safely across versions
-
+// 动态获取 ST 上下文，不使用静态 import 避免路径报错
 const MODULE_NAME = 'weaver-vec-memory';
 let extensionSettings = {};
 let isActive = false;
@@ -30,7 +26,6 @@ class LocalSearchEngine {
     }
 
     tokenize(text) {
-        // Simple tokenization for Chinese (character based with basic grouping)
         if (!text) return [];
         const words = [];
         let currentWord = '';
@@ -60,18 +55,15 @@ class LocalSearchEngine {
     }
 
     calculateScore(queryText, memoryItem) {
-        // Base score on keyword matching
         const queryTokens = new Set(this.tokenize(queryText));
         let score = 0;
         
-        // 1. Exact keyword match (highest weight)
         if (memoryItem.keywords && memoryItem.keywords.length > 0) {
             for (const kw of memoryItem.keywords) {
                 if (queryText.includes(kw)) score += 3.0;
             }
         }
         
-        // 2. Token overlap score
         const memoryTokens = this.tokenize(memoryItem.text);
         let overlapCount = 0;
         for (const token of memoryTokens) {
@@ -82,7 +74,6 @@ class LocalSearchEngine {
             score += (overlapCount / memoryTokens.length) * 2.0;
         }
         
-        // 3. Add memory's own weight and importance
         const weightMultiplier = memoryItem.weight || 1.0;
         const importanceBonus = (memoryItem.importance || 5) / 10.0;
         
@@ -92,13 +83,18 @@ class LocalSearchEngine {
 
 const localSearch = new LocalSearchEngine();
 
-// Setup UI and load settings
+// ==========================================
+// Extension API Hooks
+// ==========================================
+
 export async function init() {
-    const context = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : null;
-    if (!context) {
-        console.error(`[${MODULE_NAME}] Failed to get SillyTavern context`);
+    // 动态获取 SillyTavern 全局变量，避免 import 报错
+    if (typeof window === 'undefined' || !window.SillyTavern) {
+        console.error(`[${MODULE_NAME}] window.SillyTavern not found. Cannot initialize.`);
         return;
     }
+
+    const context = window.SillyTavern.getContext();
 
     // Load settings
     if (!context.extensionSettings[MODULE_NAME]) {
@@ -106,24 +102,26 @@ export async function init() {
     }
     extensionSettings = context.extensionSettings[MODULE_NAME];
 
-    // Load DB from local storage (we use ST's extension settings for now to keep it portable)
+    // Load DB
     if (!context.extensionSettings[`${MODULE_NAME}_db`]) {
         context.extensionSettings[`${MODULE_NAME}_db`] = {};
     }
     memoryDB = context.extensionSettings[`${MODULE_NAME}_db`];
 
-    // Build Settings UI dynamically instead of loading external HTML
+    // Build Settings UI
     buildSettingsUI();
 
-    // Hook into message events
-    const eventTypes = context.eventTypes || event_types;
-    if (context.eventSource && eventTypes) {
-        context.eventSource.on(eventTypes.MESSAGE_RECEIVED, handleMessageReceived);
-        context.eventSource.on(eventTypes.MESSAGE_SENT, applyDecay);
-        context.eventSource.on(eventTypes.GENERATE_BEFORE_COMBINE_PROMPTS, injectContext);
-        console.log(`[${MODULE_NAME}] Hooked into SillyTavern events successfully`);
+    // Hook events
+    const eventSource = context.eventSource || window.eventSource;
+    const eventTypes = context.eventTypes || window.event_types;
+    
+    if (eventSource && eventTypes) {
+        eventSource.on(eventTypes.MESSAGE_RECEIVED, handleMessageReceived);
+        eventSource.on(eventTypes.MESSAGE_SENT, applyDecay);
+        eventSource.on(eventTypes.GENERATE_BEFORE_COMBINE_PROMPTS, injectContext);
+        console.log(`[${MODULE_NAME}] Initialized and hooked events successfully`);
     } else {
-        console.error(`[${MODULE_NAME}] Failed to hook events. EventSource: ${!!context.eventSource}, EventTypes: ${!!eventTypes}`);
+        console.error(`[${MODULE_NAME}] Failed to hook events. EventSource or EventTypes missing.`);
     }
 
     isActive = true;
@@ -137,17 +135,19 @@ export function onDisable() {
     isActive = false;
 }
 
-// Generate an ID for the current chat context
+// ==========================================
+// Core Logic
+// ==========================================
+
 function getChatId() {
-    const context = SillyTavern.getContext();
-    if (context.chatId) return context.chatId; // 1.13+ has chatId
-    if (context.characters && context.characters[context.characterId]) {
-        return context.characters[context.characterId].name; // fallback
+    const context = window.SillyTavern.getContext();
+    if (context.chatId) return context.chatId; 
+    if (context.characters && context.characterId && context.characters[context.characterId]) {
+        return context.characters[context.characterId].name; 
     }
     return 'default';
 }
 
-// Ensure the memory array exists for current chat
 function getMemoryArray() {
     const chatId = getChatId();
     if (!memoryDB[chatId]) {
@@ -157,26 +157,31 @@ function getMemoryArray() {
 }
 
 function saveDB() {
-    const context = SillyTavern.getContext();
+    const context = window.SillyTavern.getContext();
     context.extensionSettings[`${MODULE_NAME}_db`] = memoryDB;
     if (context.saveSettingsDebounced) {
         context.saveSettingsDebounced();
     }
 }
 
-// Extract VEC_ARCHIVE blocks from AI responses
 function handleMessageReceived(messageId) {
     if (!isActive) return;
     
-    const context = SillyTavern.getContext();
+    const context = window.SillyTavern.getContext();
     const chat = context.chat || [];
     
-    // Find the message
-    const msg = chat.find(m => m.mes === messageId || m._mesId === messageId) || chat[chat.length - 1];
-    if (!msg || !msg.is_user) {
-        // It's an AI message
-        const content = msg ? msg.mes : '';
-        extractAndStoreMemories(content);
+    // Find message by ID or take the last one
+    let msg = null;
+    if (typeof messageId === 'number' || typeof messageId === 'string') {
+        msg = chat.find(m => m.mes === messageId || m._mesId === messageId);
+    }
+    if (!msg) {
+        msg = chat[chat.length - 1];
+    }
+    
+    // Process only if it's an AI message
+    if (msg && !msg.is_user && msg.mes) {
+        extractAndStoreMemories(msg.mes);
     }
 }
 
@@ -200,7 +205,6 @@ function extractAndStoreMemories(text) {
             const [, type, importanceStr, keywordsStr, summary, source] = lineMatch;
             const importance = parseInt(importanceStr, 10);
             
-            // Skip low importance if configured
             if (importance < extensionSettings.importanceThreshold) continue;
             
             const keywords = keywordsStr.split(',').map(k => k.trim()).filter(k => k);
@@ -212,7 +216,7 @@ function extractAndStoreMemories(text) {
                 keywords: keywords,
                 text: summary.trim(),
                 sourceTurn: source.trim(),
-                weight: 1.0, // Initial weight is 100%
+                weight: 1.0, 
                 timestamp: Date.now()
             };
             
@@ -224,10 +228,10 @@ function extractAndStoreMemories(text) {
     if (newMemoriesCount > 0) {
         console.log(`[${MODULE_NAME}] Archived ${newMemoriesCount} new memories`);
         saveDB();
+        if (typeof updateMemoryCount === 'function') updateMemoryCount();
     }
 }
 
-// Decay memory weights when user sends a message
 function applyDecay() {
     if (!isActive) return;
     
@@ -236,7 +240,7 @@ function applyDecay() {
     let changed = false;
     
     for (const mem of memories) {
-        if (mem.weight > 0.1) { // Floor it at 0.1
+        if (mem.weight > 0.1) { 
             mem.weight = mem.weight * decayFactor;
             changed = true;
         }
@@ -245,59 +249,49 @@ function applyDecay() {
     if (changed) saveDB();
 }
 
-// Hook into prompt generation
 async function injectContext(eventData) {
     if (!isActive) return;
     
-    const context = SillyTavern.getContext();
+    const context = window.SillyTavern.getContext();
     const chat = context.chat || [];
     if (chat.length === 0) return;
     
-    // Get last few messages as query context
     const recentMessages = chat.slice(-3).map(m => m.mes).join('\n');
-    
     const memories = getMemoryArray();
     if (memories.length === 0) return;
     
     let retrieved = [];
     
     if (extensionSettings.searchMode === 'api' && extensionSettings.apiKey) {
-        // TODO: Implement actual API vector search later
-        // For now fallback to local
-        console.log(`[${MODULE_NAME}] API search not fully implemented yet, falling back to local`);
+        // Fallback to local for now until API is implemented
+        console.log(`[${MODULE_NAME}] API search requested but using local fallback`);
         retrieved = localSearchRetriever(recentMessages, memories);
     } else {
         retrieved = localSearchRetriever(recentMessages, memories);
     }
     
     if (retrieved.length > 0) {
-        // Boost weights of retrieved memories (Reinforcement)
         retrieved.forEach(mem => {
             mem.weight = Math.min(1.0, mem.weight + 0.2); 
         });
         saveDB();
         
-        // Format the injection block
         let injectionText = `\n<RECALLED_MEMORY>\n`;
         injectionText += `[SYSTEM NOTE: 以下是基于当前语境自动检索的历史记忆。请在后续的 <thinking> 步骤一中参考这些事实。]\n`;
         
-        retrieved.forEach((mem, index) => {
+        retrieved.forEach((mem) => {
             injectionText += `- [${mem.type}] (重要度:${mem.importance}) ${mem.text} (出处:${mem.sourceTurn})\n`;
         });
         injectionText += `</RECALLED_MEMORY>\n`;
         
-        // Use ST's extension prompt injection API
+        // Depth 3-4 is usually right before system prompt
         if (context.setExtensionPrompt) {
-            // Position 0 = Before system prompt, 1 = After system prompt, 2 = Before scenario, etc.
-            // Depth affects how far back in the chat history it appears
             context.setExtensionPrompt(MODULE_NAME, injectionText, 0, 4);
-            console.log(`[${MODULE_NAME}] Injected ${retrieved.length} memories into prompt`);
         }
     }
 }
 
 function localSearchRetriever(queryText, memories) {
-    // Calculate scores
     const scoredMemories = memories.map(mem => {
         return {
             memory: mem,
@@ -305,15 +299,16 @@ function localSearchRetriever(queryText, memories) {
         };
     });
     
-    // Sort and filter
     return scoredMemories
-        .filter(item => item.score > 0.5) // Minimum score threshold
+        .filter(item => item.score > 0.5)
         .sort((a, b) => b.score - a.score)
         .slice(0, extensionSettings.maxRetrievedMemories || 5)
         .map(item => item.memory);
 }
 
-// ---------------- UI Building ----------------
+// ==========================================
+// UI Logic
+// ==========================================
 
 function buildSettingsUI() {
     const html = `
@@ -327,7 +322,7 @@ function buildSettingsUI() {
                     
                     <div class="memory-status-card">
                         <div id="weaver-memory-count">当前记忆库：<span>0</span> 条记录</div>
-                        <button id="weaver-memory-clear" class="menu_button">清除当前角色记忆</button>
+                        <button id="weaver-memory-clear" class="menu_button">清空本角色记忆</button>
                     </div>
 
                     <div class="set-block">
@@ -379,88 +374,94 @@ function buildSettingsUI() {
         </div>
     `;
 
-    // Append to ST's extension settings container
-    $('#extensions_settings').append(html);
+    // Make sure we use global jQuery to append to ST UI
+    if (window.$) {
+        window.$('#extensions_settings').append(html);
 
-    // Initial value setup
-    $('#weaver-search-mode').val(extensionSettings.searchMode || 'tfidf');
-    $('#weaver-api-url').val(extensionSettings.apiUrl || 'https://api.siliconflow.cn/v1/embeddings');
-    $('#weaver-api-model').val(extensionSettings.apiModel || 'BAAI/bge-m3');
-    $('#weaver-api-key').val(extensionSettings.apiKey || '');
-    $('#weaver-max-mem').val(extensionSettings.maxRetrievedMemories || 5);
-    $('#weaver-max-val').text(extensionSettings.maxRetrievedMemories || 5);
-    $('#weaver-decay').val((extensionSettings.decayRate || 0.02) * 100);
-    $('#weaver-decay-val').text((extensionSettings.decayRate || 0.02) * 100);
-    $('#weaver-thresh').val(extensionSettings.importanceThreshold || 3);
-    $('#weaver-thresh-val').text(extensionSettings.importanceThreshold || 3);
-    
-    updateMemoryCount();
-    toggleApiSettings();
-
-    // Event listeners
-    $('#weaver-search-mode').on('change', function() {
-        extensionSettings.searchMode = $(this).val();
-        saveSettings();
-        toggleApiSettings();
-    });
-
-    $('#weaver-api-url').on('input', function() { extensionSettings.apiUrl = $(this).val(); saveSettings(); });
-    $('#weaver-api-model').on('input', function() { extensionSettings.apiModel = $(this).val(); saveSettings(); });
-    $('#weaver-api-key').on('input', function() { extensionSettings.apiKey = $(this).val(); saveSettings(); });
-
-    $('#weaver-max-mem').on('input', function() { 
-        const val = parseInt($(this).val());
-        $('#weaver-max-val').text(val);
-        extensionSettings.maxRetrievedMemories = val; 
-        saveSettings(); 
-    });
-
-    $('#weaver-decay').on('input', function() { 
-        const val = parseInt($(this).val());
-        $('#weaver-decay-val').text(val);
-        extensionSettings.decayRate = val / 100.0; 
-        saveSettings(); 
-    });
-
-    $('#weaver-thresh').on('input', function() { 
-        const val = parseInt($(this).val());
-        $('#weaver-thresh-val').text(val);
-        extensionSettings.importanceThreshold = val; 
-        saveSettings(); 
-    });
-
-    $('#weaver-memory-clear').on('click', function() {
-        const chatId = getChatId();
-        if (confirm(`确定要清空当前聊天 (${chatId}) 的所有向量记忆吗？`)) {
-            memoryDB[chatId] = [];
-            saveDB();
-            updateMemoryCount();
-        }
-    });
-
-    // Update count periodically when drawer is open
-    $('.inline-drawer-toggle').on('click', function() {
-        $(this).next('.inline-drawer-content').slideToggle();
-        $(this).find('.inline-drawer-icon').toggleClass('down up');
+        // Initial value setup
+        window.$('#weaver-search-mode').val(extensionSettings.searchMode || 'tfidf');
+        window.$('#weaver-api-url').val(extensionSettings.apiUrl || 'https://api.siliconflow.cn/v1/embeddings');
+        window.$('#weaver-api-model').val(extensionSettings.apiModel || 'BAAI/bge-m3');
+        window.$('#weaver-api-key').val(extensionSettings.apiKey || '');
+        window.$('#weaver-max-mem').val(extensionSettings.maxRetrievedMemories || 5);
+        window.$('#weaver-max-val').text(extensionSettings.maxRetrievedMemories || 5);
+        window.$('#weaver-decay').val((extensionSettings.decayRate || 0.02) * 100);
+        window.$('#weaver-decay-val').text((extensionSettings.decayRate || 0.02) * 100);
+        window.$('#weaver-thresh').val(extensionSettings.importanceThreshold || 3);
+        window.$('#weaver-thresh-val').text(extensionSettings.importanceThreshold || 3);
+        
         updateMemoryCount();
-    });
-}
+        toggleApiSettings();
 
-function toggleApiSettings() {
-    if ($('#weaver-search-mode').val() === 'api') {
-        $('#weaver-api-settings').slideDown();
+        // Event listeners
+        window.$('#weaver-search-mode').on('change', function() {
+            extensionSettings.searchMode = window.$(this).val();
+            saveSettings();
+            toggleApiSettings();
+        });
+
+        window.$('#weaver-api-url').on('input', function() { extensionSettings.apiUrl = window.$(this).val(); saveSettings(); });
+        window.$('#weaver-api-model').on('input', function() { extensionSettings.apiModel = window.$(this).val(); saveSettings(); });
+        window.$('#weaver-api-key').on('input', function() { extensionSettings.apiKey = window.$(this).val(); saveSettings(); });
+
+        window.$('#weaver-max-mem').on('input', function() { 
+            const val = parseInt(window.$(this).val());
+            window.$('#weaver-max-val').text(val);
+            extensionSettings.maxRetrievedMemories = val; 
+            saveSettings(); 
+        });
+
+        window.$('#weaver-decay').on('input', function() { 
+            const val = parseInt(window.$(this).val());
+            window.$('#weaver-decay-val').text(val);
+            extensionSettings.decayRate = val / 100.0; 
+            saveSettings(); 
+        });
+
+        window.$('#weaver-thresh').on('input', function() { 
+            const val = parseInt(window.$(this).val());
+            window.$('#weaver-thresh-val').text(val);
+            extensionSettings.importanceThreshold = val; 
+            saveSettings(); 
+        });
+
+        window.$('#weaver-memory-clear').on('click', function() {
+            const chatId = getChatId();
+            if (confirm(`确定要清空当前记录的所有向量记忆吗？`)) {
+                memoryDB[chatId] = [];
+                saveDB();
+                updateMemoryCount();
+            }
+        });
+
+        window.$('.inline-drawer-toggle').on('click', function() {
+            window.$(this).next('.inline-drawer-content').slideToggle();
+            window.$(this).find('.inline-drawer-icon').toggleClass('down up');
+            updateMemoryCount();
+        });
     } else {
-        $('#weaver-api-settings').slideUp();
+        console.error(`[${MODULE_NAME}] jQuery ($) not found!`);
     }
 }
 
-function updateMemoryCount() {
-    const count = getMemoryArray().length;
-    $('#weaver-memory-count span').text(count);
+function toggleApiSettings() {
+    if (!window.$) return;
+    if (window.$('#weaver-search-mode').val() === 'api') {
+        window.$('#weaver-api-settings').slideDown();
+    } else {
+        window.$('#weaver-api-settings').slideUp();
+    }
 }
 
+// Make it global so other functions can call it
+window.updateMemoryCount = function() {
+    if (!window.$) return;
+    const count = getMemoryArray().length;
+    window.$('#weaver-memory-count span').text(count);
+};
+
 function saveSettings() {
-    const context = SillyTavern.getContext();
+    const context = window.SillyTavern.getContext();
     context.extensionSettings[MODULE_NAME] = extensionSettings;
     if (context.saveSettingsDebounced) {
         context.saveSettingsDebounced();
