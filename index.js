@@ -1,7 +1,7 @@
-// 动态获取 ST 上下文，不使用静态 import 避免路径报错
 const MODULE_NAME = 'weaver-vec-memory';
 let extensionSettings = {};
 let isActive = false;
+let initialized = false;
 
 // Default settings
 const defaultSettings = {
@@ -87,8 +87,8 @@ const localSearch = new LocalSearchEngine();
 // Extension API Hooks
 // ==========================================
 
-export async function init() {
-    // 动态获取 SillyTavern 全局变量，避免 import 报错
+function doInit() {
+    if (initialized) return;
     if (typeof window === 'undefined' || !window.SillyTavern) {
         console.error(`[${MODULE_NAME}] window.SillyTavern not found. Cannot initialize.`);
         return;
@@ -96,25 +96,21 @@ export async function init() {
 
     const context = window.SillyTavern.getContext();
 
-    // Load settings
     if (!context.extensionSettings[MODULE_NAME]) {
         context.extensionSettings[MODULE_NAME] = { ...defaultSettings };
     }
     extensionSettings = context.extensionSettings[MODULE_NAME];
 
-    // Load DB
     if (!context.extensionSettings[`${MODULE_NAME}_db`]) {
         context.extensionSettings[`${MODULE_NAME}_db`] = {};
     }
     memoryDB = context.extensionSettings[`${MODULE_NAME}_db`];
 
-    // Build Settings UI
     buildSettingsUI();
 
-    // Hook events
     const eventSource = context.eventSource || window.eventSource;
     const eventTypes = context.eventTypes || window.event_types;
-    
+
     if (eventSource && eventTypes) {
         eventSource.on(eventTypes.MESSAGE_RECEIVED, handleMessageReceived);
         eventSource.on(eventTypes.MESSAGE_SENT, applyDecay);
@@ -125,6 +121,19 @@ export async function init() {
     }
 
     isActive = true;
+    initialized = true;
+}
+
+// hooks.activate — called by ST 1.14+ via manifest hooks
+export async function init() {
+    doInit();
+}
+
+// jQuery ready fallback — for ST 1.13.x which has no hooks mechanism
+if (typeof jQuery !== 'undefined') {
+    jQuery(() => doInit());
+} else if (typeof window !== 'undefined' && window.$) {
+    window.$(() => doInit());
 }
 
 export function onEnable() {
@@ -432,12 +441,6 @@ function buildSettingsUI() {
                 saveDB();
                 updateMemoryCount();
             }
-        });
-
-        window.$('.inline-drawer-toggle').on('click', function() {
-            window.$(this).next('.inline-drawer-content').slideToggle();
-            window.$(this).find('.inline-drawer-icon').toggleClass('down up');
-            updateMemoryCount();
         });
     } else {
         console.error(`[${MODULE_NAME}] jQuery ($) not found!`);
