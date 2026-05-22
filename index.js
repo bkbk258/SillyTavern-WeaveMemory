@@ -321,14 +321,14 @@ function localSearchRetriever(queryText, memories) {
 
 function buildSettingsUI() {
     const html = `
-        <div class="weaver-vec-settings">
+        <div id="weaver-vec-settings" class="extension_container">
             <div class="inline-drawer">
                 <div class="inline-drawer-toggle inline-drawer-header">
-                    <b>织法·向量记忆 (Weaver Memory)</b>
-                    <div class="inline-drawer-icon fa-solid fa-brain down"></div>
+                    <b>织法·向量记忆</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
                 </div>
-                <div class="inline-drawer-content" style="display: none;">
-                    
+                <div class="inline-drawer-content">
+
                     <div class="memory-status-card">
                         <div id="weaver-memory-count">当前记忆库：<span>0</span> 条记录</div>
                         <button id="weaver-memory-clear" class="menu_button">清空本角色记忆</button>
