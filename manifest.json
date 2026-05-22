@@ -1,0 +1,18 @@
+{
+    "display_name": "织法·向量记忆",
+    "loading_order": 15,
+    "requires": [],
+    "optional": [],
+    "dependencies": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "bk的殿下",
+    "version": "1.0.0",
+    "homePage": "",
+    "minimum_client_version": "1.13.0",
+    "hooks": {
+        "activate": "init",
+        "enable": "onEnable",
+        "disable": "onDisable"
+    }
+}

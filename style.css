@@ -1,0 +1,52 @@
+.weaver-vec-settings {
+    margin-bottom: 10px;
+}
+
+.weaver-vec-settings .flex-container {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+
+.weaver-vec-settings .flex-container input[type=range] {
+    flex-grow: 1;
+    margin-left: 15px;
+}
+
+.weaver-vec-settings .set-block {
+    margin-bottom: 15px;
+}
+
+.weaver-vec-settings small {
+    display: block;
+    color: var(--greyText);
+    margin-top: 5px;
+    font-size: 0.85em;
+}
+
+.weaver-vec-settings .memory-status-card {
+    background-color: var(--black50a);
+    border: 1px solid var(--smartThemeBorder);
+    border-radius: 5px;
+    padding: 10px;
+    margin-bottom: 15px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+#weaver-memory-count span {
+    font-weight: bold;
+    color: var(--smartThemeInteractive);
+    font-size: 1.2em;
+}
+
+#weaver-memory-clear {
+    background-color: rgb(150, 40, 40);
+    color: white;
+}
+
+#weaver-memory-clear:hover {
+    background-color: rgb(200, 50, 50);
+}
