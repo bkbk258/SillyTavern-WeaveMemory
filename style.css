@@ -64,7 +64,8 @@
     background-color: rgb(200, 50, 50);
 }
 
-#weaver-memory-panel {
+#weaver-memory-panel,
+#weaver-manual-panel {
     border: 1px solid var(--smartThemeBorder);
     border-radius: 8px;
     padding: 10px;
@@ -75,6 +76,25 @@
 #weaver-memory-search {
     margin-bottom: 10px;
     width: 100%;
+}
+
+#weaver-manual-panel .weaver-manual-grid {
+    display: grid;
+    grid-template-columns: 1fr 120px;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+#weaver-manual-panel input,
+#weaver-manual-panel textarea,
+#weaver-manual-panel select {
+    margin-bottom: 8px;
+    width: 100%;
+}
+
+#weaver-manual-panel textarea {
+    min-height: 70px;
+    resize: vertical;
 }
 
 #weaver-memory-list {

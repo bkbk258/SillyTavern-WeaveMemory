@@ -1,6 +1,6 @@
 const MODULE_NAME = 'weaver-vec-memory';
 const MEMORY_STORE_KEY = 'weaverVecMemory';
-const DISPLAY_NAME = '织法·回响纺锤（v1.1.1）';
+const DISPLAY_NAME = '织法·回响纺锤（v1.1.2）';
 
 let extensionSettings = {};
 let memoryState = null;
@@ -164,6 +164,7 @@ function normalizeMemoryItem(item) {
         sourceTurn: String(item.sourceTurn || '').trim(),
         sourceMessageIndex: Number.isFinite(Number(item.sourceMessageIndex)) ? Number(item.sourceMessageIndex) : null,
         sourceMessageHash: item.sourceMessageHash || '',
+        sourceKind: item.sourceKind || 'auto',
         weight: clampNumber(Number(item.weight) || 1.0, 0.1, 1.5),
         timestamp: item.timestamp || Date.now(),
         updatedAt: item.updatedAt || item.timestamp || Date.now(),
@@ -244,11 +245,11 @@ function handleMessageReceived(messageId) {
     if (msg && !msg.is_user && msg.mes) extractAndStoreMemories(msg.mes, msg);
 }
 
-function extractAndStoreMemories(text, message = null) {
-    if (!text) return;
+function extractAndStoreMemories(text, message = null, options = {}) {
+    if (!text) return 0;
 
     const sourceMeta = getMessageSourceMeta(message, text);
-    removeMemoriesFromMessage(sourceMeta);
+    if (options.replace !== false) removeMemoriesFromMessage(sourceMeta);
 
     const archiveRegex = /<VEC_ARCHIVE>([\s\S]*?)<\/VEC_ARCHIVE>/g;
     let match;
@@ -261,7 +262,7 @@ function extractAndStoreMemories(text, message = null) {
 
         while ((lineMatch = lineRegex.exec(blockContent)) !== null) {
             const [, type, importanceStr, keywordsStr, summary, source] = lineMatch;
-            const memoryItem = buildMemoryItem(type, importanceStr, keywordsStr, summary, source, sourceMeta);
+            const memoryItem = buildMemoryItem(type, importanceStr, keywordsStr, summary, source, sourceMeta, 'auto');
             if (!memoryItem) continue;
             if (isDuplicateMemory(memoryItem)) continue;
 
@@ -275,6 +276,7 @@ function extractAndStoreMemories(text, message = null) {
         saveDB();
         updateMemoryPanel();
     }
+    return newMemoriesCount;
 }
 
 function getMessageSourceMeta(message, text) {
@@ -295,7 +297,7 @@ function removeMemoriesFromMessage(sourceMeta) {
     sourceMeta.removedCount = before - memoryState.memories.length;
 }
 
-function buildMemoryItem(type, importanceStr, keywordsStr, summary, source, sourceMeta = {}) {
+function buildMemoryItem(type, importanceStr, keywordsStr, summary, source, sourceMeta = {}, sourceKind = 'auto') {
     const importance = parseInt(importanceStr, 10);
     const text = String(summary || '').trim();
     const keywords = String(keywordsStr || '').split(',').map(k => k.trim()).filter(Boolean);
@@ -315,6 +317,7 @@ function buildMemoryItem(type, importanceStr, keywordsStr, summary, source, sour
         sourceTurn: source,
         sourceMessageIndex: sourceMeta.index,
         sourceMessageHash: sourceMeta.hash,
+        sourceKind,
         weight: 1.0,
         timestamp: Date.now(),
         updatedAt: Date.now()
@@ -517,6 +520,9 @@ function buildSettingsUI() {
                         <div id="weaver-memory-count">当前记忆库：<span>0</span> 条记录</div>
                         <div class="weaver-status-buttons">
                             <button id="weaver-memory-toggle" class="menu_button">查看记忆明细</button>
+                            <button id="weaver-sync-latest" class="menu_button">同步最新楼层</button>
+                            <button id="weaver-rebuild-chat" class="menu_button">重建当前聊天记忆</button>
+                            <button id="weaver-manual-add" class="menu_button">手动添加记忆</button>
                             <button id="weaver-memory-export" class="menu_button">导出 JSON</button>
                             <button id="weaver-memory-import" class="menu_button">导入 JSON</button>
                             <button id="weaver-memory-clear" class="menu_button">清空本对话记忆</button>
@@ -525,6 +531,27 @@ function buildSettingsUI() {
 
                     <input type="file" id="weaver-memory-import-file" accept="application/json,.json" style="display: none;">
                     <div id="weaver-memory-import-status"></div>
+
+                    <div id="weaver-manual-panel" style="display: none;">
+                        <h4>手动添加记忆</h4>
+                        <div class="weaver-manual-grid">
+                            <select id="weaver-manual-type" class="text_pole">
+                                <option value="DETAIL">DETAIL（可回调细节）</option>
+                                <option value="RELATION">RELATION（关系变更）</option>
+                                <option value="ITEM">ITEM（物品事件）</option>
+                                <option value="ROOT_CLOSED">ROOT_CLOSED（根脉闭环）</option>
+                                <option value="HIDE_REVEALED">HIDE_REVEALED（伏笔揭露）</option>
+                                <option value="WORLD_RESOLVED">WORLD_RESOLVED（世界线收束）</option>
+                            </select>
+                            <input id="weaver-manual-importance" type="number" min="1" max="10" value="5" class="text_pole" placeholder="重要度 1-10">
+                        </div>
+                        <input id="weaver-manual-keywords" class="text_pole" placeholder="关键词，用逗号分隔，例如：信任, 玉佩, 约定">
+                        <textarea id="weaver-manual-text" class="text_pole" placeholder="一句话写清楚这个事实，例如：user在危机中选择信任char，两人关系从戒备转为初步信任。"></textarea>
+                        <div class="weaver-status-buttons">
+                            <button id="weaver-manual-save" class="menu_button">保存手动记忆</button>
+                            <button id="weaver-manual-cancel" class="menu_button">取消</button>
+                        </div>
+                    </div>
 
                     <div id="weaver-memory-panel" style="display: none;">
                         <input type="text" id="weaver-memory-search" class="text_pole" placeholder="搜索摘要、关键词、类型或出处...">
@@ -658,6 +685,11 @@ function bindSettingsEvents() {
     window.$('#weaver-memory-export').on('click', exportMemories);
     window.$('#weaver-memory-import').on('click', () => window.$('#weaver-memory-import-file').val('').trigger('click'));
     window.$('#weaver-memory-import-file').on('change', importMemoriesFromFile);
+    window.$('#weaver-sync-latest').on('click', syncLatestAssistantMessage);
+    window.$('#weaver-rebuild-chat').on('click', rebuildCurrentChatMemories);
+    window.$('#weaver-manual-add').on('click', () => window.$('#weaver-manual-panel').slideToggle());
+    window.$('#weaver-manual-cancel').on('click', () => window.$('#weaver-manual-panel').slideUp());
+    window.$('#weaver-manual-save').on('click', addManualMemory);
 
     window.$('#weaver-memory-clear').on('click', function() {
         if (confirm('确定要清空当前对话的所有回响记忆吗？')) {
@@ -696,6 +728,7 @@ function renderMemoryList() {
                     <span class="weaver-memory-type">${escapeHtml(mem.type)}</span>
                     <span>重要度 ${mem.importance}</span>
                     <span>权重 ${Number(mem.weight || 1).toFixed(2)}</span>
+                    <span>${mem.sourceKind === 'manual' ? '手动添加' : '自动归档'}</span>
                     <span>${mem.embedding ? '已有向量' : '未生成向量'}</span>
                 </div>
                 <textarea class="weaver-memory-text text_pole">${escapeHtml(mem.text)}</textarea>
@@ -746,6 +779,71 @@ function deleteMemory(id) {
     memoryState.memories = getMemoryArray().filter(mem => mem.id !== id);
     saveDB();
     updateMemoryPanel();
+}
+
+function getLatestAssistantMessage() {
+    const chat = getContext().chat || [];
+    for (let i = chat.length - 1; i >= 0; i--) {
+        if (chat[i] && !chat[i].is_user && chat[i].mes) return chat[i];
+    }
+    return null;
+}
+
+function syncLatestAssistantMessage() {
+    const message = getLatestAssistantMessage();
+    if (!message) {
+        setImportStatus('同步失败：当前聊天里没有找到 char 楼层。', 'error');
+        return;
+    }
+
+    const sourceMeta = getMessageSourceMeta(message, message.mes);
+    const before = getMemoryArray().filter(mem => mem.sourceMessageIndex === sourceMeta.index).length;
+    const count = extractAndStoreMemories(message.mes, message);
+    setImportStatus(`最新楼层同步完成：清理 ${before} 条旧记忆，新增 ${count} 条；若该楼层没有 VEC_ARCHIVE，则只清理不新增。`, 'success');
+}
+
+function rebuildCurrentChatMemories() {
+    if (!confirm('确定要按当前聊天内容重建记忆库吗？这会清空现有自动/手动记忆，再从当前聊天里的 VEC_ARCHIVE 重新读取。')) return;
+
+    const chat = getContext().chat || [];
+    memoryState.memories = [];
+    let total = 0;
+    chat.forEach(message => {
+        if (message && !message.is_user && message.mes) {
+            total += extractAndStoreMemories(message.mes, message, { replace: false });
+        }
+    });
+    saveDB();
+    updateMemoryPanel();
+    setImportStatus(`当前聊天记忆已重建：共读取 ${total} 条自动记忆。`, 'success');
+}
+
+function addManualMemory() {
+    const latestMessage = getLatestAssistantMessage();
+    const sourceMeta = latestMessage ? getMessageSourceMeta(latestMessage, latestMessage.mes) : { index: null, hash: '', removedCount: 0 };
+    const type = window.$('#weaver-manual-type').val();
+    const importance = window.$('#weaver-manual-importance').val();
+    const keywords = window.$('#weaver-manual-keywords').val();
+    const text = window.$('#weaver-manual-text').val();
+    const sourceTurn = sourceMeta.index === null ? '手动添加' : `第${sourceMeta.index + 1}楼`;
+    const memoryItem = buildMemoryItem(type, importance, keywords, text, sourceTurn, sourceMeta, 'manual');
+
+    if (!memoryItem) {
+        setImportStatus('手动添加失败：请填写摘要、至少一个关键词，并确认重要度是 1-10。', 'error');
+        return;
+    }
+    if (isDuplicateMemory(memoryItem)) {
+        setImportStatus('手动添加失败：已有高度相似的记忆。', 'error');
+        return;
+    }
+
+    getMemoryArray().push(memoryItem);
+    saveDB();
+    updateMemoryPanel();
+    window.$('#weaver-manual-text').val('');
+    window.$('#weaver-manual-keywords').val('');
+    window.$('#weaver-manual-panel').slideUp();
+    setImportStatus('手动记忆已添加。', 'success');
 }
 
 function exportMemories() {
