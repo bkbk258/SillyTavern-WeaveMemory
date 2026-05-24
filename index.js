@@ -1,6 +1,6 @@
 const MODULE_NAME = 'weaver-vec-memory';
 const MEMORY_STORE_KEY = 'weaverVecMemory';
-const DISPLAY_NAME = '织法·回响纺锤（v1.1）';
+const DISPLAY_NAME = '织法·回响纺锤（v1.1.1）';
 
 let extensionSettings = {};
 let memoryState = null;
@@ -162,6 +162,8 @@ function normalizeMemoryItem(item) {
         keywords: Array.isArray(item.keywords) ? item.keywords.map(k => String(k).trim()).filter(Boolean) : [],
         text: String(item.text || '').trim(),
         sourceTurn: String(item.sourceTurn || '').trim(),
+        sourceMessageIndex: Number.isFinite(Number(item.sourceMessageIndex)) ? Number(item.sourceMessageIndex) : null,
+        sourceMessageHash: item.sourceMessageHash || '',
         weight: clampNumber(Number(item.weight) || 1.0, 0.1, 1.5),
         timestamp: item.timestamp || Date.now(),
         updatedAt: item.updatedAt || item.timestamp || Date.now(),
@@ -239,11 +241,14 @@ function handleMessageReceived(messageId) {
     }
     if (!msg) msg = chat[chat.length - 1];
 
-    if (msg && !msg.is_user && msg.mes) extractAndStoreMemories(msg.mes);
+    if (msg && !msg.is_user && msg.mes) extractAndStoreMemories(msg.mes, msg);
 }
 
-function extractAndStoreMemories(text) {
+function extractAndStoreMemories(text, message = null) {
     if (!text) return;
+
+    const sourceMeta = getMessageSourceMeta(message, text);
+    removeMemoriesFromMessage(sourceMeta);
 
     const archiveRegex = /<VEC_ARCHIVE>([\s\S]*?)<\/VEC_ARCHIVE>/g;
     let match;
@@ -256,7 +261,7 @@ function extractAndStoreMemories(text) {
 
         while ((lineMatch = lineRegex.exec(blockContent)) !== null) {
             const [, type, importanceStr, keywordsStr, summary, source] = lineMatch;
-            const memoryItem = buildMemoryItem(type, importanceStr, keywordsStr, summary, source);
+            const memoryItem = buildMemoryItem(type, importanceStr, keywordsStr, summary, source, sourceMeta);
             if (!memoryItem) continue;
             if (isDuplicateMemory(memoryItem)) continue;
 
@@ -265,14 +270,32 @@ function extractAndStoreMemories(text) {
         }
     }
 
-    if (newMemoriesCount > 0) {
-        console.log(`[${MODULE_NAME}] Archived ${newMemoriesCount} new memories`);
+    if (newMemoriesCount > 0 || sourceMeta.removedCount > 0) {
+        console.log(`[${MODULE_NAME}] Archived ${newMemoriesCount} new memories, removed ${sourceMeta.removedCount} stale memories`);
         saveDB();
         updateMemoryPanel();
     }
 }
 
-function buildMemoryItem(type, importanceStr, keywordsStr, summary, source) {
+function getMessageSourceMeta(message, text) {
+    const context = getContext();
+    const chat = context.chat || [];
+    const index = message ? chat.indexOf(message) : chat.length - 1;
+    return {
+        index: index >= 0 ? index : null,
+        hash: simpleHash(text || message?.mes || ''),
+        removedCount: 0
+    };
+}
+
+function removeMemoriesFromMessage(sourceMeta) {
+    if (sourceMeta.index === null) return;
+    const before = getMemoryArray().length;
+    memoryState.memories = getMemoryArray().filter(mem => mem.sourceMessageIndex !== sourceMeta.index);
+    sourceMeta.removedCount = before - memoryState.memories.length;
+}
+
+function buildMemoryItem(type, importanceStr, keywordsStr, summary, source, sourceMeta = {}) {
     const importance = parseInt(importanceStr, 10);
     const text = String(summary || '').trim();
     const keywords = String(keywordsStr || '').split(',').map(k => k.trim()).filter(Boolean);
@@ -290,6 +313,8 @@ function buildMemoryItem(type, importanceStr, keywordsStr, summary, source) {
         keywords,
         text,
         sourceTurn: source,
+        sourceMessageIndex: sourceMeta.index,
+        sourceMessageHash: sourceMeta.hash,
         weight: 1.0,
         timestamp: Date.now(),
         updatedAt: Date.now()
@@ -493,9 +518,13 @@ function buildSettingsUI() {
                         <div class="weaver-status-buttons">
                             <button id="weaver-memory-toggle" class="menu_button">查看记忆明细</button>
                             <button id="weaver-memory-export" class="menu_button">导出 JSON</button>
+                            <button id="weaver-memory-import" class="menu_button">导入 JSON</button>
                             <button id="weaver-memory-clear" class="menu_button">清空本对话记忆</button>
                         </div>
                     </div>
+
+                    <input type="file" id="weaver-memory-import-file" accept="application/json,.json" style="display: none;">
+                    <div id="weaver-memory-import-status"></div>
 
                     <div id="weaver-memory-panel" style="display: none;">
                         <input type="text" id="weaver-memory-search" class="text_pole" placeholder="搜索摘要、关键词、类型或出处...">
@@ -627,6 +656,8 @@ function bindSettingsEvents() {
     });
 
     window.$('#weaver-memory-export').on('click', exportMemories);
+    window.$('#weaver-memory-import').on('click', () => window.$('#weaver-memory-import-file').val('').trigger('click'));
+    window.$('#weaver-memory-import-file').on('change', importMemoriesFromFile);
 
     window.$('#weaver-memory-clear').on('click', function() {
         if (confirm('确定要清空当前对话的所有回响记忆吗？')) {
@@ -670,6 +701,7 @@ function renderMemoryList() {
                 <textarea class="weaver-memory-text text_pole">${escapeHtml(mem.text)}</textarea>
                 <input class="weaver-memory-keywords text_pole" value="${escapeHtml(mem.keywords.join(', '))}" placeholder="关键词，用逗号分隔">
                 <div class="weaver-memory-foot">
+                    <span>来源消息：${formatMessageIndex(mem.sourceMessageIndex)}</span>
                     <span>出处：${escapeHtml(mem.sourceTurn || '未标注')}</span>
                     <span>${formatTime(mem.timestamp)}</span>
                     <input class="weaver-memory-importance" type="number" min="1" max="10" value="${mem.importance}">
@@ -727,6 +759,50 @@ function exportMemories() {
     URL.revokeObjectURL(url);
 }
 
+function importMemoriesFromFile(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+        try {
+            const imported = JSON.parse(reader.result);
+            const importedMemories = extractImportedMemories(imported);
+            if (importedMemories.length === 0) {
+                setImportStatus('导入失败：JSON 里没有找到可用记忆。', 'error');
+                return;
+            }
+
+            const mode = confirm('选择“确定”=覆盖当前记忆库；选择“取消”=追加导入并跳过重复项。') ? 'replace' : 'append';
+            if (mode === 'replace') {
+                memoryState.memories = importedMemories.map(normalizeMemoryItem).filter(mem => mem.text);
+            } else {
+                let added = 0;
+                for (const item of importedMemories.map(normalizeMemoryItem).filter(mem => mem.text)) {
+                    if (isDuplicateMemory(item)) continue;
+                    memoryState.memories.push(item);
+                    added++;
+                }
+                setImportStatus(`追加导入完成：新增 ${added} 条，重复内容已跳过。`, 'success');
+            }
+
+            saveDB();
+            updateMemoryPanel();
+            if (mode === 'replace') setImportStatus(`覆盖导入完成：当前共有 ${memoryState.memories.length} 条记忆。`, 'success');
+        } catch (error) {
+            setImportStatus(`导入失败：${getErrorMessage(error)}`, 'error');
+        }
+    };
+    reader.readAsText(file);
+}
+
+function extractImportedMemories(imported) {
+    if (Array.isArray(imported)) return imported;
+    if (Array.isArray(imported?.memories)) return imported.memories;
+    if (Array.isArray(imported?.weaverVecMemory?.memories)) return imported.weaverVecMemory.memories;
+    return [];
+}
+
 async function testApiConnection() {
     setApiStatus('正在测试连接...', 'info');
     try {
@@ -765,6 +841,14 @@ function setApiStatus(message, type) {
         .text(message || '');
 }
 
+function setImportStatus(message, type) {
+    if (!window.$) return;
+    window.$('#weaver-memory-import-status')
+        .removeClass('success error info')
+        .addClass(type || 'info')
+        .text(message || '');
+}
+
 function saveSettings() {
     const context = getContext();
     context.extensionSettings[MODULE_NAME] = extensionSettings;
@@ -782,6 +866,20 @@ function getErrorMessage(error) {
 function formatTime(timestamp) {
     if (!timestamp) return '';
     return new Date(timestamp).toLocaleString();
+}
+
+function formatMessageIndex(index) {
+    return Number.isFinite(Number(index)) ? `第 ${Number(index) + 1} 楼` : '未标注';
+}
+
+function simpleHash(text) {
+    let hash = 0;
+    const source = String(text || '');
+    for (let i = 0; i < source.length; i++) {
+        hash = ((hash << 5) - hash) + source.charCodeAt(i);
+        hash |= 0;
+    }
+    return `${source.length}-${Math.abs(hash)}`;
 }
 
 function escapeHtml(value) {

@@ -1,5 +1,5 @@
 {
-    "display_name": "织法·回响纺锤（v1.1）",
+    "display_name": "织法·回响纺锤（v1.1.1）",
     "loading_order": 15,
     "requires": [],
     "optional": [],
@@ -7,7 +7,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "bk的殿下",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "homePage": "",
     "minimum_client_version": "1.13.0",
     "hooks": {
