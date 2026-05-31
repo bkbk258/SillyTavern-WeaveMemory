@@ -1,6 +1,6 @@
 const MODULE_NAME = 'weaver-vec-memory';
 const MEMORY_STORE_KEY = 'weaverVecMemory';
-const DISPLAY_NAME = '织法·回响纺锤（v1.1.2）';
+const DISPLAY_NAME = '织法·回响纺锤（v1.1.3）';
 
 let extensionSettings = {};
 let memoryState = null;
@@ -14,6 +14,7 @@ const defaultSettings = {
     decayRate: 0.02,
     maxRetrievedMemories: 5,
     importanceThreshold: 3,
+    enabled: true,
     searchMode: 'tfidf',
     apiUrl: 'https://api.siliconflow.cn/v1/embeddings',
     apiModel: 'BAAI/bge-m3',
@@ -111,7 +112,7 @@ function doInit() {
         console.error(`[${MODULE_NAME}] Failed to hook events. EventSource or EventTypes missing.`);
     }
 
-    isActive = true;
+    isActive = extensionSettings.enabled !== false;
     initialized = true;
 }
 
@@ -516,6 +517,14 @@ function buildSettingsUI() {
                     <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
                 </div>
                 <div class="inline-drawer-content">
+                    <div class="weaver-enable-card">
+                        <label class="weaver-enable-label">
+                            <input type="checkbox" id="weaver-enabled-toggle">
+                            <span><b>启用回响纺锤</b></span>
+                        </label>
+                        <small>关闭后不会自动收录或注入记忆，也不会执行记忆衰减；已有记忆仍可查看、编辑、导入导出。</small>
+                    </div>
+
                     <div class="memory-status-card">
                         <div id="weaver-memory-count">当前记忆库：<span>0</span> 条记录</div>
                         <div class="weaver-status-buttons">
@@ -623,6 +632,7 @@ function buildSettingsUI() {
 }
 
 function hydrateSettingsUI() {
+    window.$('#weaver-enabled-toggle').prop('checked', extensionSettings.enabled !== false);
     window.$('#weaver-search-mode').val(extensionSettings.searchMode || 'tfidf');
     window.$('#weaver-api-url').val(extensionSettings.apiUrl || defaultSettings.apiUrl);
     window.$('#weaver-api-model').val(extensionSettings.apiModel || defaultSettings.apiModel);
@@ -636,6 +646,13 @@ function hydrateSettingsUI() {
 }
 
 function bindSettingsEvents() {
+    window.$('#weaver-enabled-toggle').on('change', function() {
+        extensionSettings.enabled = window.$(this).is(':checked');
+        isActive = extensionSettings.enabled;
+        saveSettings();
+        setImportStatus(isActive ? '回响纺锤已启用：会自动收录并注入记忆。' : '回响纺锤已关闭：不会自动收录或注入记忆。', 'info');
+    });
+
     window.$('#weaver-search-mode').on('change', function() {
         extensionSettings.searchMode = window.$(this).val();
         saveSettings();

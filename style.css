@@ -27,17 +27,32 @@
     opacity: 0.75;
 }
 
-#weaver-vec-settings .memory-status-card {
+#weaver-vec-settings .memory-status-card,
+#weaver-vec-settings .weaver-enable-card {
     background-color: var(--black50a);
     border: 1px solid var(--smartThemeBorder);
     border-radius: 8px;
     padding: 10px;
     margin-bottom: 15px;
+}
+
+#weaver-vec-settings .memory-status-card {
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 10px;
     flex-wrap: wrap;
+}
+
+#weaver-vec-settings .weaver-enable-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+}
+
+#weaver-vec-settings .weaver-enable-label input {
+    width: auto;
 }
 
 #weaver-memory-count span {
