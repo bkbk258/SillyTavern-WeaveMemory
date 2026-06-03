@@ -21,6 +21,10 @@ const defaultSettings = {
     enabled: true,
     pauseNextRecall: false,
     calibrationResponseLength: 1200,
+    calibrationSource: 'st',
+    calibrationApiUrl: 'https://api.siliconflow.cn/v1/chat/completions',
+    calibrationApiModel: '',
+    calibrationApiKey: '',
     searchMode: 'tfidf',
     apiUrl: 'https://api.siliconflow.cn/v1/embeddings',
     apiModel: 'BAAI/bge-m3',
@@ -665,6 +669,29 @@ function buildSettingsUI() {
                             <label><input type="radio" name="weaver-calibration-action" value="generate" checked> 用大总结生成新的校准记忆</label>
                             <label><input type="radio" name="weaver-calibration-action" value="clear"> 仅清理旧自动记忆，不新增</label>
                         </div>
+                        <div class="weaver-radio-block">
+                            <b>生成来源</b>
+                            <label><input type="radio" name="weaver-calibration-source" value="st" checked> 使用当前 SillyTavern 模型</label>
+                            <label><input type="radio" name="weaver-calibration-source" value="api"> 使用校准专用 API</label>
+                        </div>
+                        <div id="weaver-calibration-api-settings" style="display: none;">
+                            <div class="set-block">
+                                <label>校准 API 地址</label>
+                                <input type="text" id="weaver-calibration-api-url" class="text_pole" placeholder="https://api.siliconflow.cn/v1/chat/completions">
+                            </div>
+                            <div class="set-block">
+                                <label>校准模型名称</label>
+                                <input type="text" id="weaver-calibration-api-model" class="text_pole" placeholder="例如 Qwen/Qwen2.5-72B-Instruct">
+                            </div>
+                            <div class="set-block">
+                                <label>校准 API Key</label>
+                                <input type="password" id="weaver-calibration-api-key" class="text_pole" placeholder="sk-...">
+                            </div>
+                            <div class="weaver-status-buttons">
+                                <button id="weaver-calibration-api-test" class="menu_button">测试校准模型</button>
+                            </div>
+                            <div id="weaver-calibration-api-status"></div>
+                        </div>
                         <div class="weaver-warning">默认保留手动添加记忆；确认写入或清理前会自动备份。</div>
                         <div class="weaver-status-buttons">
                             <button id="weaver-calibration-start" class="menu_button">生成校准预览</button>
@@ -790,6 +817,11 @@ function hydrateSettingsUI() {
     window.$('#weaver-api-url').val(extensionSettings.apiUrl || defaultSettings.apiUrl);
     window.$('#weaver-api-model').val(extensionSettings.apiModel || defaultSettings.apiModel);
     window.$('#weaver-api-key').val(extensionSettings.apiKey || '');
+    window.$(`input[name="weaver-calibration-source"][value="${extensionSettings.calibrationSource || 'st'}"]`).prop('checked', true);
+    window.$('#weaver-calibration-api-url').val(extensionSettings.calibrationApiUrl || defaultSettings.calibrationApiUrl);
+    window.$('#weaver-calibration-api-model').val(extensionSettings.calibrationApiModel || '');
+    window.$('#weaver-calibration-api-key').val(extensionSettings.calibrationApiKey || '');
+    toggleCalibrationApiSettings();
     window.$('#weaver-recall-preset').val(extensionSettings.recallPreset || 'standard');
     window.$('#weaver-custom-recall').val(extensionSettings.customRetrievedMemories || extensionSettings.maxRetrievedMemories || 4);
     toggleCustomRecallInput();
@@ -817,8 +849,17 @@ function bindSettingsEvents() {
     window.$('#weaver-api-url').on('input', function() { extensionSettings.apiUrl = window.$(this).val(); saveSettings(); });
     window.$('#weaver-api-model').on('input', function() { extensionSettings.apiModel = window.$(this).val(); saveSettings(); });
     window.$('#weaver-api-key').on('input', function() { extensionSettings.apiKey = window.$(this).val(); saveSettings(); });
+    window.$('input[name="weaver-calibration-source"]').on('change', function() {
+        extensionSettings.calibrationSource = window.$(this).val();
+        saveSettings();
+        toggleCalibrationApiSettings();
+    });
+    window.$('#weaver-calibration-api-url').on('input', function() { extensionSettings.calibrationApiUrl = window.$(this).val(); saveSettings(); });
+    window.$('#weaver-calibration-api-model').on('input', function() { extensionSettings.calibrationApiModel = window.$(this).val(); saveSettings(); });
+    window.$('#weaver-calibration-api-key').on('input', function() { extensionSettings.calibrationApiKey = window.$(this).val(); saveSettings(); });
 
     window.$('#weaver-api-test').on('click', testApiConnection);
+    window.$('#weaver-calibration-api-test').on('click', testCalibrationApiConnection);
     window.$('#weaver-regenerate-embeddings').on('click', regenerateMissingEmbeddings);
 
     window.$('#weaver-recall-preset').on('change', function() {
@@ -1212,7 +1253,9 @@ ${summaryMessage.mes}
     const responseLength = clampNumber(parseInt(extensionSettings.calibrationResponseLength, 10) || 1200, 300, 4000);
     let raw = '';
 
-    if (typeof context.generateRaw === 'function') {
+    if ((extensionSettings.calibrationSource || 'st') === 'api') {
+        raw = await createCalibrationChatCompletion(systemPrompt, prompt, responseLength);
+    } else if (typeof context.generateRaw === 'function') {
         raw = await context.generateRaw({
             prompt,
             systemPrompt,
@@ -1221,7 +1264,7 @@ ${summaryMessage.mes}
     } else if (typeof context.generateQuietPrompt === 'function') {
         raw = await context.generateQuietPrompt(`${systemPrompt}\n\n${prompt}`);
     } else {
-        throw new Error('当前 SillyTavern 没有提供后台生成或静默生成接口，无法自动生成校准记忆。你可以使用“仅清理旧自动记忆”模式。');
+        throw new Error('当前 SillyTavern 没有提供后台生成或静默生成接口，无法自动生成校准记忆。你可以使用校准专用 API，或改用“仅清理旧自动记忆”模式。');
     }
 
     return parseCalibrationMemories(raw, {
@@ -1229,6 +1272,40 @@ ${summaryMessage.mes}
         hash: simpleHash(summaryMessage.mes),
         sourceTurn: `大总结校准｜第${summaryFloor}楼`
     });
+}
+
+async function createCalibrationChatCompletion(systemPrompt, prompt, responseLength) {
+    const apiUrl = String(extensionSettings.calibrationApiUrl || '').trim();
+    const model = String(extensionSettings.calibrationApiModel || '').trim();
+    const apiKey = String(extensionSettings.calibrationApiKey || '').trim();
+    if (!apiUrl || !model || !apiKey) throw new Error('校准专用 API 配置不完整，请填写 API 地址、模型名称和 API Key。');
+
+    const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+            model,
+            messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: prompt }
+            ],
+            temperature: 0.2,
+            max_tokens: responseLength
+        })
+    });
+
+    if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`校准 API 返回 ${response.status}: ${text.slice(0, 220)}`);
+    }
+
+    const data = await response.json();
+    const content = data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || '';
+    if (!content) throw new Error('校准 API 返回结果里没有可用文本。');
+    return content;
 }
 
 function parseCalibrationMemories(rawText, sourceMeta) {
@@ -1461,6 +1538,21 @@ async function testApiConnection() {
     }
 }
 
+async function testCalibrationApiConnection() {
+    setCalibrationApiStatus('正在测试校准模型...', 'info');
+    try {
+        const raw = await createCalibrationChatCompletion(
+            '你是 JSON 生成测试器。只输出 JSON 数组。',
+            '请输出一个 JSON 数组，里面只有一条对象：{"type":"DETAIL","importance":5,"keywords":["测试"],"text":"校准模型连接测试成功。"}',
+            200
+        );
+        parseCalibrationMemories(raw, { index: null, hash: '', sourceTurn: '校准模型测试' });
+        setCalibrationApiStatus('校准模型连接成功，并返回了可解析的 JSON。', 'success');
+    } catch (error) {
+        setCalibrationApiStatus(`校准模型测试失败：${getErrorMessage(error)}`, 'error');
+    }
+}
+
 async function regenerateMissingEmbeddings() {
     setApiStatus('正在生成缺失向量...', 'info');
     try {
@@ -1478,6 +1570,12 @@ function toggleCustomRecallInput() {
     window.$('#weaver-custom-recall').toggle(isCustom);
 }
 
+function toggleCalibrationApiSettings() {
+    if (!window.$) return;
+    const source = window.$('input[name="weaver-calibration-source"]:checked').val() || extensionSettings.calibrationSource || 'st';
+    window.$('#weaver-calibration-api-settings').toggle(source === 'api');
+}
+
 function updatePauseButton() {
     if (!window.$) return;
     const paused = extensionSettings.pauseNextRecall === true;
@@ -1493,6 +1591,14 @@ function toggleApiSettings() {
     } else {
         window.$('#weaver-api-settings').slideUp();
     }
+}
+
+function setCalibrationApiStatus(message, type) {
+    if (!window.$) return;
+    window.$('#weaver-calibration-api-status')
+        .removeClass('success error info')
+        .addClass(type || 'info')
+        .text(message || '');
 }
 
 function setApiStatus(message, type) {

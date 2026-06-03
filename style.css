@@ -245,6 +245,7 @@
 }
 
 #weaver-api-status,
+#weaver-calibration-api-status,
 #weaver-memory-import-status {
     min-height: 20px;
     margin: 8px 0 12px;
@@ -252,16 +253,19 @@
 }
 
 #weaver-api-status.success,
+#weaver-calibration-api-status.success,
 #weaver-memory-import-status.success {
     color: rgb(80, 200, 120);
 }
 
 #weaver-api-status.error,
+#weaver-calibration-api-status.error,
 #weaver-memory-import-status.error {
     color: rgb(240, 100, 100);
 }
 
 #weaver-api-status.info,
+#weaver-calibration-api-status.info,
 #weaver-memory-import-status.info {
     color: var(--greyText);
 }
