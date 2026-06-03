@@ -1,20 +1,26 @@
 const MODULE_NAME = 'weaver-vec-memory';
 const MEMORY_STORE_KEY = 'weaverVecMemory';
-const DISPLAY_NAME = '织法·回响纺锤（v1.1.3）';
+const DISPLAY_NAME = '织法·回响纺锤（v1.2.0）';
 
 let extensionSettings = {};
 let memoryState = null;
 let isActive = false;
 let initialized = false;
 let memoryListVisible = false;
+let recallPreviewVisible = false;
+let calibrationPanelVisible = false;
 let memorySearchTerm = '';
 
 const defaultSettings = {
     archiveTriggerTurns: 5,
     decayRate: 0.02,
-    maxRetrievedMemories: 5,
+    maxRetrievedMemories: 4,
+    recallPreset: 'standard',
+    customRetrievedMemories: 4,
     importanceThreshold: 3,
     enabled: true,
+    pauseNextRecall: false,
+    calibrationResponseLength: 1200,
     searchMode: 'tfidf',
     apiUrl: 'https://api.siliconflow.cn/v1/embeddings',
     apiModel: 'BAAI/bge-m3',
@@ -75,6 +81,41 @@ class LocalSearchEngine {
 }
 
 const localSearch = new LocalSearchEngine();
+
+const MANUAL_MEMORY_TEMPLATES = {
+    detail: {
+        type: 'DETAIL',
+        importance: 5,
+        keywords: '可回调细节, 关键词',
+        text: '一句话写清楚可在后文回调的小细节，例如：char把旧钥匙交给user，并约定危急时用它打开北侧暗门。'
+    },
+    relation: {
+        type: 'RELATION',
+        importance: 7,
+        keywords: '关系变化, 信任, 关键词',
+        text: '一句话写清楚关系从什么状态变成什么状态，例如：user在危机中选择信任char，两人关系从戒备转为初步同盟。'
+    },
+    item: {
+        type: 'ITEM',
+        importance: 6,
+        keywords: '物品事件, 道具名, 关键词',
+        text: '一句话写清楚物品归属、状态或用途，例如：银色怀表已由char交给user，表盖内刻着失踪者的名字。'
+    },
+    reveal: {
+        type: 'HIDE_REVEALED',
+        importance: 8,
+        keywords: '伏笔揭露, 真相, 关键词',
+        text: '一句话写清楚哪个伏笔被揭露、真相是什么，例如：此前反复出现的铃声实际来自封印装置启动前的预警。'
+    }
+};
+
+const RECALL_PRESET_LIMITS = {
+    light: 2,
+    standard: 4,
+    deep: 6
+};
+
+const CALIBRATION_TYPES = ['DETAIL', 'RELATION', 'ITEM', 'ROOT_CLOSED', 'HIDE_REVEALED', 'WORLD_RESOLVED'];
 
 function doInit() {
     if (initialized) return;
@@ -140,8 +181,11 @@ function getContext() {
 
 function createEmptyMemoryState() {
     return {
-        version: 1,
+        version: 2,
         memories: [],
+        lastRecall: null,
+        lastBackup: null,
+        pendingCalibration: null,
         lastUpdated: Date.now()
     };
 }
@@ -185,8 +229,11 @@ function loadMemoryState() {
     }
 
     memoryState = context.chatMetadata[MEMORY_STORE_KEY];
-    memoryState.version = 1;
+    memoryState.version = 2;
     memoryState.memories = (memoryState.memories || []).map(normalizeMemoryItem).filter(mem => mem.text);
+    memoryState.lastRecall = memoryState.lastRecall || null;
+    memoryState.lastBackup = memoryState.lastBackup || null;
+    memoryState.pendingCalibration = memoryState.pendingCalibration || null;
     memoryState.lastUpdated = memoryState.lastUpdated || Date.now();
 }
 
@@ -294,7 +341,10 @@ function getMessageSourceMeta(message, text) {
 function removeMemoriesFromMessage(sourceMeta) {
     if (sourceMeta.index === null) return;
     const before = getMemoryArray().length;
-    memoryState.memories = getMemoryArray().filter(mem => mem.sourceMessageIndex !== sourceMeta.index);
+    memoryState.memories = getMemoryArray().filter(mem => {
+        if (mem.sourceKind === 'manual') return true;
+        return mem.sourceMessageIndex !== sourceMeta.index;
+    });
     sourceMeta.removedCount = before - memoryState.memories.length;
 }
 
@@ -366,9 +416,36 @@ async function injectContext() {
     const chat = context.chat || [];
     if (chat.length === 0) return;
 
+    if (extensionSettings.pauseNextRecall) {
+        extensionSettings.pauseNextRecall = false;
+        saveSettings();
+        clearRecallPrompt(context);
+        saveLastRecall({
+            status: 'skipped',
+            timestamp: Date.now(),
+            queryPreview: '',
+            memories: [],
+            injectionText: '',
+            message: '已按用户设置跳过本轮回响，下轮自动恢复。'
+        });
+        setImportStatus('已跳过本轮回响，下轮自动恢复。', 'info');
+        return;
+    }
+
     const recentMessages = chat.slice(-3).map(m => m.mes).join('\n');
     const memories = getMemoryArray();
-    if (memories.length === 0) return;
+    if (memories.length === 0) {
+        clearRecallPrompt(context);
+        saveLastRecall({
+            status: 'empty',
+            timestamp: Date.now(),
+            queryPreview: recentMessages.slice(-240),
+            memories: [],
+            injectionText: '',
+            message: '当前记忆库为空，本轮没有召回。'
+        });
+        return;
+    }
 
     let retrieved = [];
     if (extensionSettings.searchMode === 'api' && extensionSettings.apiKey) {
@@ -392,7 +469,25 @@ async function injectContext() {
         });
         injectionText += `</RECALLED_MEMORY>\n`;
 
+        saveLastRecall({
+            status: 'injected',
+            timestamp: Date.now(),
+            queryPreview: recentMessages.slice(-240),
+            memories: retrieved.map(toRecallSnapshot),
+            injectionText
+        });
+
         if (context.setExtensionPrompt) context.setExtensionPrompt(MODULE_NAME, injectionText, 0, 4);
+    } else {
+        clearRecallPrompt(context);
+        saveLastRecall({
+            status: 'none',
+            timestamp: Date.now(),
+            queryPreview: recentMessages.slice(-240),
+            memories: [],
+            injectionText: '',
+            message: '上一轮没有匹配到可召回记忆。'
+        });
     }
 }
 
@@ -401,7 +496,7 @@ function localSearchRetriever(queryText, memories) {
         .map(mem => ({ memory: mem, score: localSearch.calculateScore(queryText, mem) }))
         .filter(item => item.score > 0.5)
         .sort((a, b) => b.score - a.score)
-        .slice(0, extensionSettings.maxRetrievedMemories || 5)
+        .slice(0, getRecallLimit())
         .map(item => item.memory);
 }
 
@@ -420,7 +515,7 @@ async function hybridSearchRetriever(queryText, memories) {
             .sort((a, b) => b.score - a.score);
 
         return fuseRankings(localRanked, vectorRanked)
-            .slice(0, extensionSettings.maxRetrievedMemories || 5)
+            .slice(0, getRecallLimit())
             .map(item => item.memory);
     } catch (error) {
         console.warn(`[${MODULE_NAME}] Hybrid search failed, falling back to local search:`, error);
@@ -529,8 +624,12 @@ function buildSettingsUI() {
                         <div id="weaver-memory-count">当前记忆库：<span>0</span> 条记录</div>
                         <div class="weaver-status-buttons">
                             <button id="weaver-memory-toggle" class="menu_button">查看记忆明细</button>
+                            <button id="weaver-recall-preview-toggle" class="menu_button">最近召回预览</button>
+                            <button id="weaver-pause-next" class="menu_button">暂停下一轮回响</button>
                             <button id="weaver-sync-latest" class="menu_button">同步最新楼层</button>
                             <button id="weaver-rebuild-chat" class="menu_button">重建当前聊天记忆</button>
+                            <button id="weaver-calibration-toggle" class="menu_button">大总结校准记忆</button>
+                            <button id="weaver-restore-backup" class="menu_button">恢复上一次备份</button>
                             <button id="weaver-manual-add" class="menu_button">手动添加记忆</button>
                             <button id="weaver-memory-export" class="menu_button">导出 JSON</button>
                             <button id="weaver-memory-import" class="menu_button">导入 JSON</button>
@@ -539,10 +638,56 @@ function buildSettingsUI() {
                     </div>
 
                     <input type="file" id="weaver-memory-import-file" accept="application/json,.json" style="display: none;">
+                    <div id="weaver-backup-info" class="weaver-backup-info"></div>
                     <div id="weaver-memory-import-status"></div>
+
+                    <div id="weaver-recall-preview-panel" style="display: none;">
+                        <h4>最近一次召回预览</h4>
+                        <div id="weaver-recall-preview-content"></div>
+                    </div>
+
+                    <div id="weaver-calibration-panel" style="display: none;">
+                        <h4>大总结校准记忆</h4>
+                        <small>适合在你手动修正大总结、准备隐藏前文继续聊时使用。大总结会被视为最高事实源。</small>
+                        <div class="weaver-calibration-grid">
+                            <label>大总结所在楼层<input id="weaver-calibration-summary-floor" type="number" min="1" class="text_pole" placeholder="例如 100"></label>
+                            <label>分段起始楼层<input id="weaver-calibration-start-floor" type="number" min="1" class="text_pole" placeholder="分段时填写"></label>
+                            <label>分段结束楼层<input id="weaver-calibration-end-floor" type="number" min="1" class="text_pole" placeholder="分段时填写"></label>
+                        </div>
+                        <div class="weaver-radio-block">
+                            <b>校准范围</b>
+                            <label><input type="radio" name="weaver-calibration-range" value="before" checked> 全文校准：处理大总结之前所有旧自动记忆</label>
+                            <label><input type="radio" name="weaver-calibration-range" value="range"> 分段校准：只处理上面填写的楼层范围</label>
+                        </div>
+                        <div class="weaver-radio-block">
+                            <b>校准方式</b>
+                            <label><input type="radio" name="weaver-calibration-action" value="generate" checked> 用大总结生成新的校准记忆</label>
+                            <label><input type="radio" name="weaver-calibration-action" value="clear"> 仅清理旧自动记忆，不新增</label>
+                        </div>
+                        <div class="weaver-warning">默认保留手动添加记忆；确认写入或清理前会自动备份。</div>
+                        <div class="weaver-status-buttons">
+                            <button id="weaver-calibration-start" class="menu_button">生成校准预览</button>
+                            <button id="weaver-calibration-cancel" class="menu_button">取消</button>
+                        </div>
+                        <div id="weaver-calibration-preview-panel" style="display: none;">
+                            <h4>校准预览</h4>
+                            <div id="weaver-calibration-preview-content"></div>
+                            <div class="weaver-status-buttons">
+                                <button id="weaver-calibration-apply" class="menu_button">确认写入校准记忆</button>
+                                <button id="weaver-calibration-discard" class="menu_button">取消预览</button>
+                            </div>
+                        </div>
+                    </div>
 
                     <div id="weaver-manual-panel" style="display: none;">
                         <h4>手动添加记忆</h4>
+                        <select id="weaver-manual-template" class="text_pole">
+                            <option value="">选择记忆模板（可选）</option>
+                            <option value="relation">关系变化模板</option>
+                            <option value="item">物品事件模板</option>
+                            <option value="reveal">伏笔揭露模板</option>
+                            <option value="detail">可回调细节模板</option>
+                        </select>
                         <div class="weaver-manual-grid">
                             <select id="weaver-manual-type" class="text_pole">
                                 <option value="DETAIL">DETAIL（可回调细节）</option>
@@ -601,9 +746,16 @@ function buildSettingsUI() {
                     </div>
 
                     <h4>核心参数调节</h4>
-                    <div class="set-block flex-container">
-                        <label>单轮最大检索量 <span id="weaver-max-val">5</span>条</label>
-                        <input type="range" id="weaver-max-mem" min="1" max="10" value="5">
+                    <div class="set-block">
+                        <label><b>召回数量档位</b></label>
+                        <select id="weaver-recall-preset" class="text_pole">
+                            <option value="light">轻量：2 条</option>
+                            <option value="standard">标准：4 条</option>
+                            <option value="deep">深度：6 条</option>
+                            <option value="custom">自定义</option>
+                        </select>
+                        <input id="weaver-custom-recall" type="number" min="1" max="10" class="text_pole" style="display:none; margin-top:8px;" placeholder="自定义召回条数">
+                        <small>控制每轮最多注入几条回响记忆。条数越多，越容易召回细节，也越容易占用上下文。</small>
                     </div>
                     <div class="set-block flex-container">
                         <label>记忆衰减率 <span id="weaver-decay-val">2</span>%</label>
@@ -637,8 +789,9 @@ function hydrateSettingsUI() {
     window.$('#weaver-api-url').val(extensionSettings.apiUrl || defaultSettings.apiUrl);
     window.$('#weaver-api-model').val(extensionSettings.apiModel || defaultSettings.apiModel);
     window.$('#weaver-api-key').val(extensionSettings.apiKey || '');
-    window.$('#weaver-max-mem').val(extensionSettings.maxRetrievedMemories || 5);
-    window.$('#weaver-max-val').text(extensionSettings.maxRetrievedMemories || 5);
+    window.$('#weaver-recall-preset').val(extensionSettings.recallPreset || 'standard');
+    window.$('#weaver-custom-recall').val(extensionSettings.customRetrievedMemories || extensionSettings.maxRetrievedMemories || 4);
+    toggleCustomRecallInput();
     window.$('#weaver-decay').val((extensionSettings.decayRate || 0.02) * 100);
     window.$('#weaver-decay-val').text((extensionSettings.decayRate || 0.02) * 100);
     window.$('#weaver-thresh').val(extensionSettings.importanceThreshold || 3);
@@ -666,9 +819,16 @@ function bindSettingsEvents() {
     window.$('#weaver-api-test').on('click', testApiConnection);
     window.$('#weaver-regenerate-embeddings').on('click', regenerateMissingEmbeddings);
 
-    window.$('#weaver-max-mem').on('input', function() {
-        const val = parseInt(window.$(this).val(), 10);
-        window.$('#weaver-max-val').text(val);
+    window.$('#weaver-recall-preset').on('change', function() {
+        extensionSettings.recallPreset = window.$(this).val();
+        extensionSettings.maxRetrievedMemories = getRecallLimit();
+        saveSettings();
+        toggleCustomRecallInput();
+    });
+
+    window.$('#weaver-custom-recall').on('input', function() {
+        const val = clampNumber(parseInt(window.$(this).val(), 10) || 4, 1, 10);
+        extensionSettings.customRetrievedMemories = val;
         extensionSettings.maxRetrievedMemories = val;
         saveSettings();
     });
@@ -694,6 +854,26 @@ function bindSettingsEvents() {
         renderMemoryList();
     });
 
+    window.$('#weaver-recall-preview-toggle').on('click', function() {
+        recallPreviewVisible = !recallPreviewVisible;
+        window.$('#weaver-recall-preview-panel').toggle(recallPreviewVisible);
+        window.$(this).text(recallPreviewVisible ? '收起召回预览' : '最近召回预览');
+        renderRecallPreview();
+    });
+
+    window.$('#weaver-pause-next').on('click', function() {
+        extensionSettings.pauseNextRecall = true;
+        saveSettings();
+        setImportStatus('已设置：下一轮回响会暂停，之后自动恢复。', 'info');
+    });
+
+    window.$('#weaver-calibration-toggle').on('click', function() {
+        calibrationPanelVisible = !calibrationPanelVisible;
+        window.$('#weaver-calibration-panel').toggle(calibrationPanelVisible);
+        window.$(this).text(calibrationPanelVisible ? '收起大总结校准' : '大总结校准记忆');
+        renderCalibrationPreview();
+    });
+
     window.$('#weaver-memory-search').on('input', function() {
         memorySearchTerm = window.$(this).val().trim().toLowerCase();
         renderMemoryList();
@@ -704,15 +884,23 @@ function bindSettingsEvents() {
     window.$('#weaver-memory-import-file').on('change', importMemoriesFromFile);
     window.$('#weaver-sync-latest').on('click', syncLatestAssistantMessage);
     window.$('#weaver-rebuild-chat').on('click', rebuildCurrentChatMemories);
+    window.$('#weaver-restore-backup').on('click', restoreLastBackup);
     window.$('#weaver-manual-add').on('click', () => window.$('#weaver-manual-panel').slideToggle());
     window.$('#weaver-manual-cancel').on('click', () => window.$('#weaver-manual-panel').slideUp());
     window.$('#weaver-manual-save').on('click', addManualMemory);
+    window.$('#weaver-manual-template').on('change', applyManualTemplate);
+    window.$('#weaver-calibration-start').on('click', startCalibration);
+    window.$('#weaver-calibration-cancel').on('click', () => window.$('#weaver-calibration-panel').slideUp());
+    window.$('#weaver-calibration-apply').on('click', confirmCalibrationApply);
+    window.$('#weaver-calibration-discard').on('click', cancelCalibrationPreview);
 
     window.$('#weaver-memory-clear').on('click', function() {
         if (confirm('确定要清空当前对话的所有回响记忆吗？')) {
+            createMemoryBackup('清空本对话记忆');
             memoryState.memories = [];
             saveDB();
             updateMemoryPanel();
+            renderBackupInfo();
         }
     });
 }
@@ -721,7 +909,9 @@ function updateMemoryPanel() {
     if (!window.$) return;
     const count = getMemoryArray().length;
     window.$('#weaver-memory-count span').text(count);
+    renderBackupInfo();
     renderMemoryList();
+    renderRecallPreview();
 }
 
 window.updateMemoryCount = updateMemoryPanel;
@@ -745,7 +935,7 @@ function renderMemoryList() {
                     <span class="weaver-memory-type">${escapeHtml(mem.type)}</span>
                     <span>重要度 ${mem.importance}</span>
                     <span>权重 ${Number(mem.weight || 1).toFixed(2)}</span>
-                    <span>${mem.sourceKind === 'manual' ? '手动添加' : '自动归档'}</span>
+                    <span>${getSourceKindLabel(mem.sourceKind)}</span>
                     <span>${mem.embedding ? '已有向量' : '未生成向量'}</span>
                 </div>
                 <textarea class="weaver-memory-text text_pole">${escapeHtml(mem.text)}</textarea>
@@ -798,6 +988,335 @@ function deleteMemory(id) {
     updateMemoryPanel();
 }
 
+function getRecallLimit() {
+    const preset = extensionSettings.recallPreset || 'standard';
+    if (preset === 'custom') {
+        return clampNumber(parseInt(extensionSettings.customRetrievedMemories, 10) || parseInt(extensionSettings.maxRetrievedMemories, 10) || 4, 1, 10);
+    }
+    return RECALL_PRESET_LIMITS[preset] || 4;
+}
+
+function toRecallSnapshot(mem) {
+    return {
+        id: mem.id,
+        type: mem.type,
+        importance: mem.importance,
+        sourceTurn: mem.sourceTurn,
+        sourceKind: mem.sourceKind,
+        text: mem.text,
+        keywords: Array.isArray(mem.keywords) ? [...mem.keywords] : []
+    };
+}
+
+function saveLastRecall(recall) {
+    memoryState.lastRecall = recall;
+    saveDB();
+    renderRecallPreview();
+}
+
+function clearRecallPrompt(context = getContext()) {
+    if (context.setExtensionPrompt) context.setExtensionPrompt(MODULE_NAME, '', 0, 4);
+}
+
+function renderRecallPreview() {
+    if (!window.$ || !recallPreviewVisible) return;
+    const container = window.$('#weaver-recall-preview-content');
+    container.empty();
+    const recall = memoryState?.lastRecall;
+    if (!recall) {
+        container.append('<div class="weaver-empty">还没有召回记录。</div>');
+        return;
+    }
+
+    const statusText = recall.message || (recall.status === 'injected' ? `上次实际注入 ${recall.memories?.length || 0} 条记忆。` : '上一轮没有召回。');
+    container.append(`<div class="weaver-backup-info">${escapeHtml(statusText)}${recall.timestamp ? `｜${escapeHtml(formatTime(recall.timestamp))}` : ''}</div>`);
+
+    if (recall.injectionText) {
+        container.append(`<textarea class="text_pole weaver-recall-text" readonly>${escapeHtml(recall.injectionText)}</textarea>`);
+    }
+
+    const memories = recall.memories || [];
+    if (memories.length === 0) return;
+    memories.forEach(mem => {
+        container.append(`
+            <div class="weaver-memory-card">
+                <div class="weaver-memory-head">
+                    <span class="weaver-memory-type">${escapeHtml(mem.type)}</span>
+                    <span>重要度 ${escapeHtml(mem.importance)}</span>
+                    <span>${escapeHtml(getSourceKindLabel(mem.sourceKind))}</span>
+                    <span>${escapeHtml(mem.sourceTurn || '未标注')}</span>
+                </div>
+                <div>${escapeHtml(mem.text)}</div>
+                <small>关键词：${escapeHtml((mem.keywords || []).join(', ') || '无')}</small>
+            </div>
+        `);
+    });
+}
+
+function createMemoryBackup(reason) {
+    memoryState.lastBackup = {
+        reason,
+        timestamp: Date.now(),
+        count: getMemoryArray().length,
+        memories: JSON.parse(JSON.stringify(getMemoryArray()))
+    };
+}
+
+function restoreLastBackup() {
+    const backup = memoryState?.lastBackup;
+    if (!backup || !Array.isArray(backup.memories)) {
+        setImportStatus('恢复失败：当前没有可恢复的备份。', 'error');
+        return;
+    }
+    if (!confirm(`确定要恢复上一次备份吗？
+备份原因：${backup.reason || '未标注'}
+备份条数：${backup.count || backup.memories.length}`)) return;
+    memoryState.memories = backup.memories.map(normalizeMemoryItem).filter(mem => mem.text);
+    saveDB();
+    updateMemoryPanel();
+    setImportStatus('已恢复上一次备份。', 'success');
+}
+
+function renderBackupInfo() {
+    if (!window.$) return;
+    const backup = memoryState?.lastBackup;
+    if (!backup) {
+        window.$('#weaver-backup-info').text('');
+        return;
+    }
+    window.$('#weaver-backup-info').text(`最近备份：${backup.reason || '未标注'}｜${formatTime(backup.timestamp)}｜${backup.count || backup.memories?.length || 0} 条`);
+}
+
+function applyManualTemplate() {
+    const key = window.$('#weaver-manual-template').val();
+    const tpl = MANUAL_MEMORY_TEMPLATES[key];
+    if (!tpl) return;
+    window.$('#weaver-manual-type').val(tpl.type);
+    window.$('#weaver-manual-importance').val(tpl.importance);
+    window.$('#weaver-manual-keywords').attr('placeholder', tpl.keywords);
+    window.$('#weaver-manual-text').attr('placeholder', tpl.text);
+    if (!window.$('#weaver-manual-text').val().trim()) window.$('#weaver-manual-text').val('');
+}
+
+function getChatMessageByDisplayFloor(floor) {
+    const displayFloor = parseInt(floor, 10);
+    const chat = getContext().chat || [];
+    if (!Number.isFinite(displayFloor) || displayFloor < 1 || displayFloor > chat.length) {
+        throw new Error(`楼层 ${floor || ''} 不存在。当前聊天共有 ${chat.length} 楼。`);
+    }
+    const index = displayFloor - 1;
+    const message = chat[index];
+    if (!message || !message.mes) throw new Error(`第 ${displayFloor} 楼没有可用文本。`);
+    if (message.is_user) throw new Error(`第 ${displayFloor} 楼是用户楼层，请选择含大总结的 AI 楼层。`);
+    return { message, index, displayFloor };
+}
+
+function getCalibrationRange(summaryFloor, mode, startFloor, endFloor) {
+    const chatLength = (getContext().chat || []).length;
+    const summaryIndex = summaryFloor - 1;
+    let startIndex = 0;
+    let endIndex = summaryIndex - 1;
+
+    if (mode === 'range') {
+        const start = parseInt(startFloor, 10);
+        const end = parseInt(endFloor, 10);
+        if (!Number.isFinite(start) || !Number.isFinite(end)) throw new Error('分段校准需要填写起始楼层和结束楼层。');
+        if (start < 1 || end < 1 || start > chatLength || end > chatLength) throw new Error(`分段范围超出当前聊天楼层。当前共有 ${chatLength} 楼。`);
+        if (start > end) throw new Error('分段起始楼层不能大于结束楼层。');
+        startIndex = start - 1;
+        endIndex = end - 1;
+    }
+
+    if (endIndex < startIndex) throw new Error('当前范围内没有可处理的旧楼层。');
+    return { startIndex, endIndex, startFloor: startIndex + 1, endFloor: endIndex + 1 };
+}
+
+function countAutoMemoriesInRange(startIndex, endIndex) {
+    return getMemoryArray().filter(mem => mem.sourceKind !== 'manual' && Number.isFinite(Number(mem.sourceMessageIndex)) && mem.sourceMessageIndex >= startIndex && mem.sourceMessageIndex <= endIndex).length;
+}
+
+function removeAutoMemoriesInRange(startIndex, endIndex) {
+    const before = getMemoryArray().length;
+    memoryState.memories = getMemoryArray().filter(mem => {
+        if (mem.sourceKind === 'manual') return true;
+        const index = Number(mem.sourceMessageIndex);
+        if (!Number.isFinite(index)) return true;
+        return index < startIndex || index > endIndex;
+    });
+    return before - memoryState.memories.length;
+}
+
+function buildCalibrationSystemPrompt() {
+    return `你是“织法·回响纺锤”的记忆整理器。请只根据用户提供的【已手动修正的大总结】生成长期记忆条目。
+
+规则：
+1. 大总结是最高事实源，不要补充大总结没有明确提到的事实。
+2. 不要保留含糊、过时、可能与大总结冲突的信息。
+3. 每条记忆必须是一个清晰事实，适合后续剧情召回。
+4. 优先提取关系变化、物品事件、伏笔揭露、可回调细节、根脉闭环、世界线收束。
+5. type 只能使用：${CALIBRATION_TYPES.join(', ')}。
+6. importance 必须是 1-10 的整数。
+7. keywords 必须是字符串数组，至少 1 个。
+8. 只输出 JSON 数组，不要解释，不要 Markdown。`;
+}
+
+async function startCalibration() {
+    try {
+        const summaryFloor = parseInt(window.$('#weaver-calibration-summary-floor').val(), 10);
+        const { message, index, displayFloor } = getChatMessageByDisplayFloor(summaryFloor);
+        const rangeMode = window.$('input[name="weaver-calibration-range"]:checked').val();
+        const action = window.$('input[name="weaver-calibration-action"]:checked').val();
+        const range = getCalibrationRange(displayFloor, rangeMode, window.$('#weaver-calibration-start-floor').val(), window.$('#weaver-calibration-end-floor').val());
+        const removeCount = countAutoMemoriesInRange(range.startIndex, range.endIndex);
+        const context = getContext();
+        const plan = {
+            chatId: context.chatId || '',
+            summaryFloor: displayFloor,
+            summaryIndex: index,
+            summaryHash: simpleHash(message.mes),
+            range,
+            action,
+            removeCount,
+            createdAt: Date.now()
+        };
+
+        if (action === 'clear') {
+            memoryState.pendingCalibration = { plan, items: [], rawText: '' };
+            saveDB();
+            renderCalibrationPreview();
+            setImportStatus('仅清理模式预览已生成，请确认后执行。', 'info');
+            return;
+        }
+
+        setImportStatus('正在调用当前 SillyTavern 模型生成校准记忆...', 'info');
+        const items = await generateCalibrationMemories(message, displayFloor, index);
+        if (items.length === 0) throw new Error('模型没有返回可用的校准记忆。');
+        memoryState.pendingCalibration = { plan, items, rawText: '' };
+        saveDB();
+        renderCalibrationPreview();
+        setImportStatus(`校准预览已生成：将清理 ${removeCount} 条旧自动记忆，准备新增 ${items.length} 条校准记忆。`, 'success');
+    } catch (error) {
+        setImportStatus(`校准失败：${getErrorMessage(error)}`, 'error');
+    }
+}
+
+async function generateCalibrationMemories(summaryMessage, summaryFloor, summaryIndex) {
+    const context = getContext();
+    if (typeof context.generateRaw !== 'function') throw new Error('当前 SillyTavern 没有提供 generateRaw，无法后台生成校准记忆。');
+    const prompt = `【已手动修正的大总结｜第${summaryFloor}楼】
+${summaryMessage.mes}
+
+请根据这份大总结生成 8-30 条“回响纺锤”长期记忆。`;
+    const raw = await context.generateRaw({
+        prompt,
+        systemPrompt: buildCalibrationSystemPrompt(),
+        responseLength: clampNumber(parseInt(extensionSettings.calibrationResponseLength, 10) || 1200, 300, 4000)
+    });
+    return parseCalibrationMemories(raw, {
+        index: summaryIndex,
+        hash: simpleHash(summaryMessage.mes),
+        sourceTurn: `大总结校准｜第${summaryFloor}楼`
+    });
+}
+
+function parseCalibrationMemories(rawText, sourceMeta) {
+    const raw = String(rawText || '').trim();
+    const start = raw.indexOf('[');
+    const end = raw.lastIndexOf(']');
+    if (start < 0 || end <= start) throw new Error('模型返回内容里没有 JSON 数组。');
+    let parsed;
+    try {
+        parsed = JSON.parse(raw.slice(start, end + 1));
+    } catch (error) {
+        throw new Error(`JSON 解析失败：${getErrorMessage(error)}`);
+    }
+    if (!Array.isArray(parsed)) throw new Error('校准结果不是数组。');
+
+    const items = [];
+    for (const item of parsed) {
+        const type = CALIBRATION_TYPES.includes(String(item.type || '').trim()) ? String(item.type).trim() : 'DETAIL';
+        const keywords = Array.isArray(item.keywords) ? item.keywords.join(',') : String(item.keywords || '');
+        const memoryItem = buildMemoryItem(type, item.importance, keywords, item.text, sourceMeta.sourceTurn, sourceMeta, 'calibration');
+        if (!memoryItem) continue;
+        if (items.some(existing => textSimilarity(existing.text, memoryItem.text) > 0.88)) continue;
+        items.push(memoryItem);
+    }
+    return items;
+}
+
+function renderCalibrationPreview() {
+    if (!window.$) return;
+    const preview = memoryState?.pendingCalibration;
+    const panel = window.$('#weaver-calibration-preview-panel');
+    const content = window.$('#weaver-calibration-preview-content');
+    if (!preview) {
+        panel.hide();
+        content.empty();
+        return;
+    }
+    panel.show();
+    content.empty();
+    const plan = preview.plan;
+    content.append(`<div class="weaver-warning">将处理第 ${plan.range.startFloor} - ${plan.range.endFloor} 楼；预计清理 ${plan.removeCount} 条旧自动记忆；新增 ${preview.items.length} 条校准记忆。</div>`);
+    if (preview.items.length === 0) {
+        content.append('<div class="weaver-empty">仅清理模式：不会新增校准记忆。</div>');
+        return;
+    }
+    preview.items.forEach(mem => {
+        content.append(`
+            <div class="weaver-calibration-card">
+                <div class="weaver-memory-head">
+                    <span class="weaver-memory-type">${escapeHtml(mem.type)}</span>
+                    <span>重要度 ${escapeHtml(mem.importance)}</span>
+                    <span>${escapeHtml(mem.sourceTurn)}</span>
+                </div>
+                <div>${escapeHtml(mem.text)}</div>
+                <small>关键词：${escapeHtml((mem.keywords || []).join(', '))}</small>
+            </div>
+        `);
+    });
+}
+
+function confirmCalibrationApply() {
+    try {
+        const pending = memoryState?.pendingCalibration;
+        if (!pending) throw new Error('没有待写入的校准预览。');
+        const context = getContext();
+        if ((pending.plan.chatId || '') !== (context.chatId || '')) throw new Error('当前聊天已切换，已取消写入。');
+        const currentSummary = context.chat?.[pending.plan.summaryIndex];
+        if (!currentSummary || simpleHash(currentSummary.mes) !== pending.plan.summaryHash) throw new Error('大总结楼层内容已变化，请重新生成预览。');
+
+        createMemoryBackup('大总结校准记忆');
+        const removed = removeAutoMemoriesInRange(pending.plan.range.startIndex, pending.plan.range.endIndex);
+        let added = 0;
+        for (const item of pending.items.map(normalizeMemoryItem).filter(mem => mem.text)) {
+            if (isDuplicateMemory(item)) continue;
+            memoryState.memories.push(item);
+            added++;
+        }
+        memoryState.pendingCalibration = null;
+        saveDB();
+        updateMemoryPanel();
+        renderCalibrationPreview();
+        setImportStatus(`大总结校准完成：清理 ${removed} 条旧自动记忆，新增 ${added} 条校准记忆。`, 'success');
+    } catch (error) {
+        setImportStatus(`写入失败：${getErrorMessage(error)}`, 'error');
+    }
+}
+
+function cancelCalibrationPreview() {
+    memoryState.pendingCalibration = null;
+    saveDB();
+    renderCalibrationPreview();
+    setImportStatus('已取消校准预览，记忆库未改变。', 'info');
+}
+
+function getSourceKindLabel(sourceKind) {
+    if (sourceKind === 'manual') return '手动添加';
+    if (sourceKind === 'calibration') return '大总结校准';
+    return '自动归档';
+}
+
 function getLatestAssistantMessage() {
     const chat = getContext().chat || [];
     for (let i = chat.length - 1; i >= 0; i--) {
@@ -820,10 +1339,11 @@ function syncLatestAssistantMessage() {
 }
 
 function rebuildCurrentChatMemories() {
-    if (!confirm('确定要按当前聊天内容重建记忆库吗？这会清空现有自动/手动记忆，再从当前聊天里的 VEC_ARCHIVE 重新读取。')) return;
+    if (!confirm('确定要按当前聊天内容重建自动记忆吗？这会清理现有自动归档/校准记忆，再从当前聊天里的 VEC_ARCHIVE 重新读取；手动添加记忆会保留。')) return;
 
     const chat = getContext().chat || [];
-    memoryState.memories = [];
+    createMemoryBackup('重建当前聊天自动记忆');
+    memoryState.memories = getMemoryArray().filter(mem => mem.sourceKind === 'manual');
     let total = 0;
     chat.forEach(message => {
         if (message && !message.is_user && message.mes) {
@@ -832,7 +1352,7 @@ function rebuildCurrentChatMemories() {
     });
     saveDB();
     updateMemoryPanel();
-    setImportStatus(`当前聊天记忆已重建：共读取 ${total} 条自动记忆。`, 'success');
+    setImportStatus(`当前聊天自动记忆已重建：保留手动记忆，共读取 ${total} 条自动记忆。`, 'success');
 }
 
 function addManualMemory() {
@@ -890,6 +1410,7 @@ function importMemoriesFromFile(event) {
 
             const mode = confirm('选择“确定”=覆盖当前记忆库；选择“取消”=追加导入并跳过重复项。') ? 'replace' : 'append';
             if (mode === 'replace') {
+                createMemoryBackup('覆盖导入记忆');
                 memoryState.memories = importedMemories.map(normalizeMemoryItem).filter(mem => mem.text);
             } else {
                 let added = 0;
@@ -937,6 +1458,12 @@ async function regenerateMissingEmbeddings() {
     } catch (error) {
         setApiStatus(`生成失败：${getErrorMessage(error)}`, 'error');
     }
+}
+
+function toggleCustomRecallInput() {
+    if (!window.$) return;
+    const isCustom = window.$('#weaver-recall-preset').val() === 'custom';
+    window.$('#weaver-custom-recall').toggle(isCustom);
 }
 
 function toggleApiSettings() {

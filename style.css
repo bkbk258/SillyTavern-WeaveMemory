@@ -80,7 +80,10 @@
 }
 
 #weaver-memory-panel,
-#weaver-manual-panel {
+#weaver-manual-panel,
+#weaver-recall-preview-panel,
+#weaver-calibration-panel,
+#weaver-calibration-preview-panel {
     border: 1px solid var(--smartThemeBorder);
     border-radius: 8px;
     padding: 10px;
@@ -102,7 +105,10 @@
 
 #weaver-manual-panel input,
 #weaver-manual-panel textarea,
-#weaver-manual-panel select {
+#weaver-manual-panel select,
+#weaver-calibration-panel input,
+#weaver-calibration-panel select,
+#weaver-calibration-panel textarea {
     margin-bottom: 8px;
     width: 100%;
 }
@@ -170,6 +176,58 @@
 
 #weaver-vec-settings .weaver-memory-keywords {
     width: 100%;
+}
+
+#weaver-vec-settings .weaver-recall-text {
+    width: 100%;
+    min-height: 120px;
+    resize: vertical;
+    margin: 8px 0;
+}
+
+#weaver-vec-settings .weaver-calibration-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px;
+    margin: 10px 0;
+}
+
+#weaver-vec-settings .weaver-radio-block {
+    border: 1px solid var(--smartThemeBorder);
+    border-radius: 8px;
+    padding: 8px;
+    margin: 10px 0;
+    background-color: var(--black50a);
+}
+
+#weaver-vec-settings .weaver-radio-block label {
+    display: block;
+    margin-top: 6px;
+    cursor: pointer;
+}
+
+#weaver-vec-settings .weaver-radio-block input {
+    width: auto;
+    margin-right: 6px;
+}
+
+#weaver-vec-settings .weaver-warning,
+#weaver-vec-settings .weaver-backup-info {
+    color: var(--greyText);
+    background-color: var(--black50a);
+    border: 1px solid var(--smartThemeBorder);
+    border-radius: 8px;
+    padding: 8px;
+    margin: 8px 0;
+    font-size: 0.9em;
+}
+
+#weaver-vec-settings .weaver-calibration-card {
+    border: 1px solid var(--smartThemeBorder);
+    border-radius: 8px;
+    padding: 10px;
+    background-color: var(--black50a);
+    margin-top: 8px;
 }
 
 #weaver-vec-settings .weaver-memory-importance {
