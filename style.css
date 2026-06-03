@@ -183,7 +183,8 @@
     width: 100%;
 }
 
-#weaver-vec-settings .weaver-recall-text {
+#weaver-vec-settings .weaver-recall-text,
+#weaver-vec-settings .weaver-raw-output {
     width: 100%;
     min-height: 120px;
     resize: vertical;
