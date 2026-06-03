@@ -1219,10 +1219,7 @@ ${summaryMessage.mes}
             responseLength
         });
     } else if (typeof context.generateQuietPrompt === 'function') {
-        raw = await context.generateQuietPrompt({
-            quietPrompt: `${systemPrompt}\n\n${prompt}`,
-            responseLength
-        });
+        raw = await context.generateQuietPrompt(`${systemPrompt}\n\n${prompt}`);
     } else {
         throw new Error('当前 SillyTavern 没有提供后台生成或静默生成接口，无法自动生成校准记忆。你可以使用“仅清理旧自动记忆”模式。');
     }
