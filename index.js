@@ -419,6 +419,7 @@ async function injectContext() {
     if (extensionSettings.pauseNextRecall) {
         extensionSettings.pauseNextRecall = false;
         saveSettings();
+        updatePauseButton();
         clearRecallPrompt(context);
         saveLastRecall({
             status: 'skipped',
@@ -792,6 +793,7 @@ function hydrateSettingsUI() {
     window.$('#weaver-recall-preset').val(extensionSettings.recallPreset || 'standard');
     window.$('#weaver-custom-recall').val(extensionSettings.customRetrievedMemories || extensionSettings.maxRetrievedMemories || 4);
     toggleCustomRecallInput();
+    updatePauseButton();
     window.$('#weaver-decay').val((extensionSettings.decayRate || 0.02) * 100);
     window.$('#weaver-decay-val').text((extensionSettings.decayRate || 0.02) * 100);
     window.$('#weaver-thresh').val(extensionSettings.importanceThreshold || 3);
@@ -862,9 +864,10 @@ function bindSettingsEvents() {
     });
 
     window.$('#weaver-pause-next').on('click', function() {
-        extensionSettings.pauseNextRecall = true;
+        extensionSettings.pauseNextRecall = !extensionSettings.pauseNextRecall;
         saveSettings();
-        setImportStatus('已设置：下一轮回响会暂停，之后自动恢复。', 'info');
+        updatePauseButton();
+        setImportStatus(extensionSettings.pauseNextRecall ? '已设置：下一轮回响会暂停，之后自动恢复。' : '已取消暂停：下一轮会正常注入回响。', 'info');
     });
 
     window.$('#weaver-calibration-toggle').on('click', function() {
@@ -1201,16 +1204,29 @@ async function startCalibration() {
 
 async function generateCalibrationMemories(summaryMessage, summaryFloor, summaryIndex) {
     const context = getContext();
-    if (typeof context.generateRaw !== 'function') throw new Error('当前 SillyTavern 没有提供 generateRaw，无法后台生成校准记忆。');
+    const systemPrompt = buildCalibrationSystemPrompt();
     const prompt = `【已手动修正的大总结｜第${summaryFloor}楼】
 ${summaryMessage.mes}
 
 请根据这份大总结生成 8-30 条“回响纺锤”长期记忆。`;
-    const raw = await context.generateRaw({
-        prompt,
-        systemPrompt: buildCalibrationSystemPrompt(),
-        responseLength: clampNumber(parseInt(extensionSettings.calibrationResponseLength, 10) || 1200, 300, 4000)
-    });
+    const responseLength = clampNumber(parseInt(extensionSettings.calibrationResponseLength, 10) || 1200, 300, 4000);
+    let raw = '';
+
+    if (typeof context.generateRaw === 'function') {
+        raw = await context.generateRaw({
+            prompt,
+            systemPrompt,
+            responseLength
+        });
+    } else if (typeof context.generateQuietPrompt === 'function') {
+        raw = await context.generateQuietPrompt({
+            quietPrompt: `${systemPrompt}\n\n${prompt}`,
+            responseLength
+        });
+    } else {
+        throw new Error('当前 SillyTavern 没有提供后台生成或静默生成接口，无法自动生成校准记忆。你可以使用“仅清理旧自动记忆”模式。');
+    }
+
     return parseCalibrationMemories(raw, {
         index: summaryIndex,
         hash: simpleHash(summaryMessage.mes),
@@ -1463,6 +1479,14 @@ function toggleCustomRecallInput() {
     if (!window.$) return;
     const isCustom = window.$('#weaver-recall-preset').val() === 'custom';
     window.$('#weaver-custom-recall').toggle(isCustom);
+}
+
+function updatePauseButton() {
+    if (!window.$) return;
+    const paused = extensionSettings.pauseNextRecall === true;
+    window.$('#weaver-pause-next')
+        .toggleClass('weaver-pause-active', paused)
+        .text(paused ? '取消暂停下一轮' : '暂停下一轮回响');
 }
 
 function toggleApiSettings() {

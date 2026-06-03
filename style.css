@@ -74,6 +74,11 @@
     color: white;
 }
 
+#weaver-vec-settings .weaver-pause-active {
+    background-color: rgb(180, 120, 35);
+    color: white;
+}
+
 #weaver-memory-clear:hover,
 #weaver-vec-settings .weaver-memory-delete:hover {
     background-color: rgb(200, 50, 50);
