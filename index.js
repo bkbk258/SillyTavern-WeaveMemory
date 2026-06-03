@@ -648,7 +648,7 @@ function buildSettingsUI() {
 
                     <div id="weaver-calibration-panel" style="display: none;">
                         <h4>大总结校准记忆</h4>
-                        <small>适合在你手动修正大总结、准备隐藏前文继续聊时使用。大总结会被视为最高事实源。</small>
+                        <small>适合在你手动修正大总结、准备隐藏前文继续聊时使用。大总结会被视为最高事实源；大总结楼层可以是 AI 楼、用户楼或系统式总结楼，只要该楼文本是你确认后的事实基准即可。</small>
                         <div class="weaver-calibration-grid">
                             <label>大总结所在楼层<input id="weaver-calibration-summary-floor" type="number" min="1" class="text_pole" placeholder="例如 100"></label>
                             <label>分段起始楼层<input id="weaver-calibration-start-floor" type="number" min="1" class="text_pole" placeholder="分段时填写"></label>
@@ -1107,7 +1107,6 @@ function getChatMessageByDisplayFloor(floor) {
     const index = displayFloor - 1;
     const message = chat[index];
     if (!message || !message.mes) throw new Error(`第 ${displayFloor} 楼没有可用文本。`);
-    if (message.is_user) throw new Error(`第 ${displayFloor} 楼是用户楼层，请选择含大总结的 AI 楼层。`);
     return { message, index, displayFloor };
 }
 
