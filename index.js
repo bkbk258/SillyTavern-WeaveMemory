@@ -10,6 +10,9 @@ let memoryListVisible = false;
 let recallPreviewVisible = false;
 let calibrationPanelVisible = false;
 let memorySearchTerm = '';
+let chatChangedHandler = null;
+
+const REQUEST_TIMEOUT_MS = 15000;
 
 const defaultSettings = {
     archiveTriggerTurns: 5,
@@ -128,55 +131,92 @@ function doInit() {
         return;
     }
 
-    const context = window.SillyTavern.getContext();
+    try {
+        const context = window.SillyTavern.getContext();
 
-    context.extensionSettings[MODULE_NAME] = {
-        ...defaultSettings,
-        ...(context.extensionSettings[MODULE_NAME] || {})
-    };
-    extensionSettings = context.extensionSettings[MODULE_NAME];
+        context.extensionSettings[MODULE_NAME] = {
+            ...defaultSettings,
+            ...(context.extensionSettings[MODULE_NAME] || {})
+        };
+        extensionSettings = context.extensionSettings[MODULE_NAME];
+        isActive = extensionSettings.enabled !== false;
 
-    loadMemoryState();
-    buildSettingsUI();
+        loadMemoryState();
+        buildSettingsUI();
+        bindExtensionEvents(context);
 
+        initialized = true;
+        console.log(`[${MODULE_NAME}] Initialized successfully`);
+    } catch (error) {
+        isActive = false;
+        initialized = false;
+        console.error(`[${MODULE_NAME}] Initialization failed. Extension has been left inactive to protect SillyTavern.`, error);
+    }
+}
+
+function bindExtensionEvents(context = getContext()) {
     const eventSource = context.eventSource || window.eventSource;
     const eventTypes = context.eventTypes || window.event_types;
 
-    if (eventSource && eventTypes) {
-        eventSource.on(eventTypes.MESSAGE_RECEIVED, handleMessageReceived);
-        eventSource.on(eventTypes.MESSAGE_SENT, applyDecay);
-        eventSource.on(eventTypes.GENERATE_BEFORE_COMBINE_PROMPTS, injectContext);
-        if (eventTypes.CHAT_CHANGED) {
-            eventSource.on(eventTypes.CHAT_CHANGED, () => {
-                loadMemoryState();
-                updateMemoryPanel();
-            });
-        }
-        console.log(`[${MODULE_NAME}] Initialized and hooked events successfully`);
-    } else {
+    if (!eventSource || !eventTypes) {
         console.error(`[${MODULE_NAME}] Failed to hook events. EventSource or EventTypes missing.`);
+        return;
     }
 
-    isActive = extensionSettings.enabled !== false;
-    initialized = true;
+    unbindExtensionEvents(context);
+    chatChangedHandler = () => {
+        try {
+            loadMemoryState();
+            updateMemoryPanel();
+        } catch (error) {
+            console.error(`[${MODULE_NAME}] Failed to refresh memory state after chat change:`, error);
+        }
+    };
+
+    eventSource.on(eventTypes.MESSAGE_RECEIVED, handleMessageReceived);
+    eventSource.on(eventTypes.MESSAGE_SENT, applyDecay);
+    eventSource.on(eventTypes.GENERATE_BEFORE_COMBINE_PROMPTS, injectContext);
+    if (eventTypes.CHAT_CHANGED) eventSource.on(eventTypes.CHAT_CHANGED, chatChangedHandler);
+
+    console.log(`[${MODULE_NAME}] Hooked events successfully`);
+}
+
+function unbindExtensionEvents(context = getContext()) {
+    const eventSource = context.eventSource || window.eventSource;
+    const eventTypes = context.eventTypes || window.event_types;
+    if (!eventSource || !eventTypes || typeof eventSource.off !== 'function') return;
+
+    eventSource.off(eventTypes.MESSAGE_RECEIVED, handleMessageReceived);
+    eventSource.off(eventTypes.MESSAGE_SENT, applyDecay);
+    eventSource.off(eventTypes.GENERATE_BEFORE_COMBINE_PROMPTS, injectContext);
+    if (eventTypes.CHAT_CHANGED && chatChangedHandler) eventSource.off(eventTypes.CHAT_CHANGED, chatChangedHandler);
+    chatChangedHandler = null;
 }
 
 export async function init() {
     doInit();
 }
 
-if (typeof jQuery !== 'undefined') {
-    jQuery(() => doInit());
-} else if (typeof window !== 'undefined' && window.$) {
-    window.$(() => doInit());
-}
-
 export function onEnable() {
     isActive = true;
+    try {
+        if (initialized) {
+            bindExtensionEvents();
+        } else {
+            doInit();
+        }
+    } catch (error) {
+        console.warn(`[${MODULE_NAME}] Failed to refresh hooks while enabling:`, error);
+    }
 }
 
 export function onDisable() {
     isActive = false;
+    try {
+        unbindExtensionEvents();
+    } catch (error) {
+        console.warn(`[${MODULE_NAME}] Failed to unhook events while disabling:`, error);
+    }
 }
 
 function getContext() {
@@ -204,6 +244,7 @@ function getLegacyChatKey() {
 }
 
 function normalizeMemoryItem(item) {
+    if (!item || typeof item !== 'object') item = {};
     return {
         id: item.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         type: String(item.type || 'DETAIL').trim(),
@@ -217,24 +258,29 @@ function normalizeMemoryItem(item) {
         weight: clampNumber(Number(item.weight) || 1.0, 0.1, 1.5),
         timestamp: item.timestamp || Date.now(),
         updatedAt: item.updatedAt || item.timestamp || Date.now(),
-        embedding: Array.isArray(item.embedding) ? item.embedding : null,
+        embedding: normalizeEmbedding(item.embedding),
         embeddingModel: item.embeddingModel || '',
         embeddingUpdatedAt: item.embeddingUpdatedAt || 0
     };
+}
+
+function normalizeEmbedding(embedding) {
+    if (!Array.isArray(embedding)) return null;
+    return embedding.every(value => Number.isFinite(Number(value))) ? embedding : null;
 }
 
 function loadMemoryState() {
     const context = getContext();
     context.chatMetadata = context.chatMetadata || {};
 
-    if (!context.chatMetadata[MEMORY_STORE_KEY]) {
+    if (!context.chatMetadata[MEMORY_STORE_KEY] || typeof context.chatMetadata[MEMORY_STORE_KEY] !== 'object') {
         context.chatMetadata[MEMORY_STORE_KEY] = createEmptyMemoryState();
         migrateLegacyMemories(context.chatMetadata[MEMORY_STORE_KEY]);
     }
 
     memoryState = context.chatMetadata[MEMORY_STORE_KEY];
     memoryState.version = 2;
-    memoryState.memories = (memoryState.memories || []).map(normalizeMemoryItem).filter(mem => mem.text);
+    memoryState.memories = Array.isArray(memoryState.memories) ? memoryState.memories.map(normalizeMemoryItem).filter(mem => mem.text) : [];
     memoryState.lastRecall = memoryState.lastRecall || null;
     memoryState.lastBackup = memoryState.lastBackup || null;
     memoryState.pendingCalibration = memoryState.pendingCalibration || null;
@@ -569,7 +615,7 @@ async function ensureMemoryEmbeddings(memories) {
 
 async function createEmbedding(input) {
     if (!extensionSettings.apiKey) throw new Error('API Key 为空');
-    const response = await fetch(extensionSettings.apiUrl || defaultSettings.apiUrl, {
+    const response = await fetchWithTimeout(extensionSettings.apiUrl || defaultSettings.apiUrl, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -802,6 +848,7 @@ function buildSettingsUI() {
     `;
 
     if (window.$) {
+        window.$('#weaver-vec-settings').remove();
         window.$('#extensions_settings').append(html);
         hydrateSettingsUI();
         bindSettingsEvents();
@@ -1319,7 +1366,7 @@ async function createCalibrationChatCompletion(systemPrompt, prompt, responseLen
     const apiKey = String(extensionSettings.calibrationApiKey || '').trim();
     if (!apiUrl || !model || !apiKey) throw new Error('校准专用 API 配置不完整，请填写 API 地址、模型名称和 API Key。');
 
-    const response = await fetch(apiUrl, {
+    const response = await fetchWithTimeout(apiUrl, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -1745,6 +1792,22 @@ function saveSettings() {
     const context = getContext();
     context.extensionSettings[MODULE_NAME] = extensionSettings;
     if (context.saveSettingsDebounced) context.saveSettingsDebounced();
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, {
+            ...options,
+            signal: controller.signal
+        });
+    } catch (error) {
+        if (error?.name === 'AbortError') throw new Error(`请求超时（${Math.round(timeoutMs / 1000)}秒）`);
+        throw error;
+    } finally {
+        clearTimeout(timeout);
+    }
 }
 
 function clampNumber(value, min, max) {
