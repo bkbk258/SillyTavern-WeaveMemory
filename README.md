@@ -8,7 +8,8 @@
 ### 方式一：GitHub 链接安装（推荐）
 1. 打开 SillyTavern，进入 **扩展** 面板（顶部的魔方图标）
 2. 展开 **安装扩展** 菜单
-3. 在文本框中粘贴本插件的 GitHub 仓库地址（待定）
+3. 在文本框中粘贴本插件的 GitHub 仓库地址：
+   `https://github.com/bkbk258/SillyTavern-WeaveMemory`
 4. 点击安装并重启 SillyTavern
 
 ### 方式二：手动 ZIP 安装（无法访问 GitHub 的用户）
